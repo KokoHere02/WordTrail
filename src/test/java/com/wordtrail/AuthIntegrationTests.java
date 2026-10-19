@@ -1,6 +1,6 @@
 package com.wordtrail;
 
-import com.fasterxml.jackson.databind.*;
+import tools.jackson.databind.*;
 import com.mybatisflex.core.query.QueryWrapper;
 import com.wordtrail.security.PasswordService;
 import com.wordtrail.user.mapper.*;

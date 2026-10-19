@@ -30,7 +30,7 @@ class JwtTokenServiceTests {
         assertEquals(42, service.verify(first));
         assertNotEquals(first, service.issue(42));
         String payload = new String(Base64.getUrlDecoder().decode(first.split("\\.")[1]), java.nio.charset.StandardCharsets.UTF_8);
-        var claims = new com.fasterxml.jackson.databind.ObjectMapper().readTree(payload);
+        var claims = new tools.jackson.databind.ObjectMapper().readTree(payload);
         assertEquals(Set.of("sub", "iss", "iat", "exp", "jti"),
             new HashSet<>(claims.properties().stream().map(Map.Entry::getKey).toList()));
         assertEquals("42", claims.get("sub").asText());
