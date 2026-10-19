@@ -16,4 +16,10 @@ public class LearningBatchItem {
     private Integer sortOrder;
     private Integer result;
     private LocalDateTime answeredAt;
+    private String itemType;
+    private String learningStatus;
+    private Long queueOrder;
+    private Integer answerCount;
+    private Integer relearnCount;
+    private LocalDateTime completedAt;
 }

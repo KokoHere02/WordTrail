@@ -17,4 +17,8 @@ public class UserWordState {
     private Long lastBatchItemId;
     private LocalDateTime firstLearnedAt;
     private LocalDateTime lastLearnedAt;
+    private String planStatus;
+    private LocalDateTime joinedAt;
+    private LocalDateTime nextReviewAt;
+    private Integer reviewLevel;
 }

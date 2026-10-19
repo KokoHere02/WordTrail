@@ -2,6 +2,7 @@ package com.wordtrail.learning.entity;
 
 import com.mybatisflex.annotation.*;
 import java.time.LocalDateTime;
+import java.time.LocalDate;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -18,4 +19,7 @@ public class LearningBatch {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private LocalDateTime completedAt;
+    private String taskType;
+    private LocalDate learningDate;
+    private Integer dailyTarget;
 }
