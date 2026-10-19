@@ -71,7 +71,12 @@ class AuthIntegrationTests {
         this.transactions = transactions;
     }
 
-    @BeforeEach void resetTime() { clock.reset(); }
+    @Autowired private javax.sql.DataSource dataSource;
+
+    @BeforeEach void resetTime() throws Exception {
+        IsolatedDatabaseGuard.check(dataSource);
+        clock.reset();
+    }
 
     @AfterEach void cleanup() {
         for (Long id : createdUsers) {
@@ -294,21 +299,35 @@ class AuthIntegrationTests {
     }
 
     @Test void corsAllowsOnlyConfiguredOriginsAndAuthorizationHeader() throws Exception {
-        for (String origin : List.of("http://localhost:5173", "https://untrusted.example")) {
-            var request = HttpRequest.newBuilder(URI.create(url("/api/auth/me")))
-                .header("Origin", origin).header("Access-Control-Request-Method", "GET")
-                .header("Access-Control-Request-Headers", "authorization")
-                .method("OPTIONS", HttpRequest.BodyPublishers.noBody()).build();
-            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            if (origin.equals("http://localhost:5173")) {
-                assertEquals(200, response.statusCode());
+        for (String origin : List.of("http://localhost:5173", "http://127.0.0.1:5173", "https://untrusted.example")) {
+            for (String method : List.of("GET", "POST")) {
+                String path = method.equals("POST") ? "/api/auth/login" : "/api/auth/me";
+                String header = method.equals("POST") ? "content-type" : "authorization";
+                var request = HttpRequest.newBuilder(URI.create(url(path)))
+                    .header("Origin", origin).header("Access-Control-Request-Method", method)
+                    .header("Access-Control-Request-Headers", header)
+                    .method("OPTIONS", HttpRequest.BodyPublishers.noBody()).build();
+                var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+                if (!origin.equals("https://untrusted.example")) {
+                    assertEquals(200, response.statusCode());
+                    assertEquals(origin, response.headers().firstValue("access-control-allow-origin").orElseThrow());
+                    assertTrue(response.headers().firstValue("access-control-allow-headers").orElseThrow()
+                        .toLowerCase(Locale.ROOT).contains(header));
+                    assertTrue(response.headers().firstValue("access-control-allow-credentials").isEmpty());
+                } else {
+                    assertEquals(403, response.statusCode());
+                    assertTrue(response.headers().firstValue("access-control-allow-origin").isEmpty());
+                }
+            }
+            if (!origin.equals("https://untrusted.example")) {
+                var login = HttpRequest.newBuilder(URI.create(url("/api/auth/login")))
+                    .header("Origin", origin).header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"username\":\"user\",\"password\":\"short\"}"))
+                    .build();
+                var response = client.send(login, HttpResponse.BodyHandlers.ofString());
+                assertEquals(400, response.statusCode());
+                assertEquals("INVALID_PARAMETER", json.readTree(response.body()).get("code").asText());
                 assertEquals(origin, response.headers().firstValue("access-control-allow-origin").orElseThrow());
-                assertTrue(response.headers().firstValue("access-control-allow-headers").orElseThrow()
-                    .toLowerCase(Locale.ROOT).contains("authorization"));
-                assertTrue(response.headers().firstValue("access-control-allow-credentials").isEmpty());
-            } else {
-                assertEquals(403, response.statusCode());
-                assertTrue(response.headers().firstValue("access-control-allow-origin").isEmpty());
             }
         }
     }
