@@ -9,6 +9,13 @@ import org.springframework.web.ErrorResponse;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+    @ExceptionHandler({org.springframework.web.method.annotation.HandlerMethodValidationException.class,
+        org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class,
+        jakarta.validation.ConstraintViolationException.class})
+    ResponseEntity<ApiResponse<Void>> invalidParameter() {
+        return ResponseEntity.badRequest().body(ApiResponse.error("INVALID_PARAMETER", "请求参数不合法"));
+    }
+
     @ExceptionHandler(BusinessException.class)
     ResponseEntity<ApiResponse<Void>> business(BusinessException ex) {
         return ResponseEntity.status(ex.status()).body(ApiResponse.error(ex.code(), ex.getMessage()));
