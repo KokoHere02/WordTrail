@@ -25,8 +25,8 @@ public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
         LEFT JOIN user_word_state s ON s.word_id = w.id AND s.user_id = #{userId}
         WHERE bi.book_id = #{bookId}
         <if test="prefix != null">AND w.word LIKE #{prefix} ESCAPE '!'</if>
-        <if test="status == 'UNLEARNED'">AND s.id IS NULL</if>
-        <if test="status == 'LEARNED'">AND s.id IS NOT NULL</if>
+        <if test="status == 'UNLEARNED'">AND s.first_learned_at IS NULL</if>
+        <if test="status == 'LEARNED'">AND s.first_learned_at IS NOT NULL</if>
         """;
 
     @Select("<script>SELECT COUNT(*) " + WORDS_FROM + "</script>")
@@ -36,7 +36,7 @@ public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
     @Select("""
         <script>
         SELECT w.id, w.word, w.phonetic, w.translation,
-               CASE WHEN s.id IS NULL THEN FALSE ELSE TRUE END AS learned, s.last_result
+               CASE WHEN s.first_learned_at IS NULL THEN FALSE ELSE TRUE END AS learned, s.last_result
         """ + WORDS_FROM + """
         ORDER BY bi.sort_order ASC, bi.id ASC
         LIMIT #{limit} OFFSET #{offset}
@@ -51,7 +51,7 @@ public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
         FROM word_book_item bi
         INNER JOIN word w ON w.id = bi.word_id
         LEFT JOIN user_word_state s ON s.word_id = w.id AND s.user_id = #{userId}
-        WHERE bi.book_id = #{bookId} AND s.id IS NULL
+        WHERE bi.book_id = #{bookId} AND s.first_learned_at IS NULL
         ORDER BY bi.sort_order ASC, bi.id ASC
         LIMIT #{limit}
         """)
