@@ -10,7 +10,6 @@ import com.wordtrail.learning.entity.*;
 import com.wordtrail.learning.mapper.*;
 import com.wordtrail.learning.vo.*;
 import com.wordtrail.security.CurrentUser;
-import com.wordtrail.user.mapper.UserMapper;
 import com.wordtrail.word.entity.Word;
 import com.wordtrail.word.mapper.WordMapper;
 import com.mybatisflex.core.query.QueryWrapper;
@@ -32,16 +31,16 @@ public class LearningService {
     private final LearningBatchMapper batches;
     private final LearningBatchItemMapper details;
     private final CurrentUser currentUser;
-    private final UserMapper users;
-    private final UserWordStateMapper states;
     private final WordMapper words;
-    private final Clock clock;
+    private final LearningContext context;
+    private final ReviewEvents events;
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public PageVO<BatchListVO> list(BatchQuery request) {
         long userId = currentUser.id();
         var query = QueryWrapper.create().where(column("user_id").eq(userId))
             .and(column("status").eq(request.getStatus().name()))
+            .and(column("task_type").eq("PRACTICE"))
             .orderBy(column("created_at").desc(), column("id").desc());
         var page = batches.paginate(request.getPage(), request.getSize(), query);
         var ids = page.getRecords().stream().map(LearningBatch::getId).toList();
@@ -123,14 +122,24 @@ public class LearningService {
     @Transactional
     public AnswerVO answer(long batchId, long itemId, AnswerRequest request) {
         long userId = currentUser.id();
-        // Lock order is always user -> batch. The user row also serializes answers to the
-        // same word across different batches, including creation of a previously absent state.
+        // Lock order is always user -> batch, shared with daily answers and plan changes.
         lockUser(userId);
+        var now = context.now();
         var batch = ownedBatch(batchId, userId, true);
         requireActive(batch);
         var entries = entries(batchId);
         var item = findItem(entries, itemId);
         var word = word(item.getWordId());
+        var previous = events.findRequest(userId, request.getRequestId());
+        if (previous != null) {
+            if (previous.getBatchId() != batchId || previous.getBatchItemId() != itemId
+                    || !Objects.equals(previous.getResult(), request.getResult())) {
+                throw conflict("REQUEST_ID_REUSED", "requestId 已用于其他请求");
+            }
+            var counts = counts(entries);
+            return new AnswerVO(itemId, previous.getResult(), word.getTranslation(), previous.getAnsweredAt(),
+                batch.getStatus(), counts.wordCount(), counts.answeredCount(), counts.nextItemId());
+        }
         boolean firstAnswer = item.getResult() == null;
         if (firstAnswer) {
             if ("COMPLETED".equals(batch.getStatus())) {
@@ -140,20 +149,34 @@ public class LearningService {
                 throw conflict("ANSWER_OUT_OF_ORDER", "请先回答当前第一条未回答明细");
             }
         }
+        if (Objects.equals(item.getResult(), request.getResult()) && request.getRequestId() == null) {
+            return answerView(batch, item, word, counts(entries));
+        }
+        var original = events.latestAnswer(userId);
+        if (!firstAnswer && (original == null || original.getBatchItemId() != itemId
+                || !now.toLocalDate().equals(original.getLearningDate()))) {
+            throw conflict("CORRECTION_NOT_ALLOWED", "只能更正今日最近一次作答，历史练习结果只读");
+        }
         if (Objects.equals(item.getResult(), request.getResult())) {
+            // Reserve an explicit idempotency key even for a no-op, without changing learning time.
+            events.append(userId, item, request.getRequestId(), "CORRECTION", original.getId(),
+                request.getResult(), false, null, null, item.getAnsweredAt());
             return answerView(batch, item, word, counts(entries));
         }
 
-        // DATETIME columns have second precision. Keep the existing local-time convention.
-        LocalDateTime now = LocalDateTime.ofInstant(clock.instant(), ZoneId.systemDefault()).withNano(0);
         var patch = new LearningBatchItem();
         patch.setId(item.getId());
         patch.setResult(request.getResult());
         patch.setAnsweredAt(now);
+        patch.setLearningStatus("DONE"); patch.setCompletedAt(now);
+        patch.setAnswerCount(firstAnswer ? item.getAnswerCount() + 1 : item.getAnswerCount());
         if (details.update(patch) != 1) { throw new IllegalStateException("Could not save answer"); }
         item.setResult(request.getResult());
         item.setAnsweredAt(now);
-        updateWordState(userId, item, firstAnswer, now);
+        item.setLearningStatus("DONE"); item.setAnswerCount(patch.getAnswerCount()); item.setCompletedAt(now);
+        // Practice is an isolated exercise: it never creates, joins or schedules a plan word.
+        events.append(userId, item, request.getRequestId() == null ? UUID.randomUUID().toString() : request.getRequestId(),
+            firstAnswer ? "ANSWER" : "CORRECTION", firstAnswer ? null : original.getId(), request.getResult(), false, null, null, now);
 
         var counts = counts(entries);
         if ("IN_PROGRESS".equals(batch.getStatus()) && counts.answeredCount() == counts.wordCount()) {
@@ -169,47 +192,16 @@ public class LearningService {
         return answerView(batch, item, word, counts);
     }
 
-    private void updateWordState(long userId, LearningBatchItem item, boolean firstAnswer, LocalDateTime now) {
-        var state = states.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId))
-            .and(column("word_id").eq(item.getWordId())));
-        if (state == null) {
-            if (!firstAnswer) { return; } // A historical correction cannot become a new latest event.
-            var created = new UserWordState();
-            created.setUserId(userId);
-            created.setWordId(item.getWordId());
-            created.setFirstLearnedAt(now);
-            created.setLastLearnedAt(now);
-            created.setLastResult(item.getResult());
-            created.setLastBatchItemId(item.getId());
-            if (states.insertSelective(created) != 1) { throw new IllegalStateException("Could not create learning state"); }
-        } else if (firstAnswer || Objects.equals(state.getLastBatchItemId(), item.getId())) {
-            var patch = new UserWordState();
-            patch.setLastResult(item.getResult());
-            patch.setLastBatchItemId(item.getId());
-            patch.setLastLearnedAt(now);
-            var condition = QueryWrapper.create().where(column("id").eq(state.getId()));
-            if (!firstAnswer) { condition.and(column("last_batch_item_id").eq(item.getId())); }
-            // first_learned_at is deliberately not part of the update.
-            int updated = states.updateByQuery(patch, condition);
-            if (firstAnswer && updated != 1) { throw new IllegalStateException("Could not update learning state"); }
-        }
-    }
-
     private LearningBatch ownedBatch(long batchId, long userId, boolean lock) {
-        var query = QueryWrapper.create().where(column("id").eq(batchId)).and(column("user_id").eq(userId));
-        if (lock) { query.forUpdate(); }
-        var batch = batches.selectOneByQuery(query);
-        if (batch == null) {
-            throw new BusinessException(HttpStatus.NOT_FOUND, "BATCH_NOT_FOUND", "学习批次不存在或无权访问");
+        var batch = context.ownedBatch(userId, batchId, lock);
+        if ("DAILY".equals(batch.getTaskType())) {
+            throw conflict("DAILY_ENDPOINT_REQUIRED", "每日任务请使用 /daily 接口，完成状态不能通过 result 判定");
         }
         return batch;
     }
 
     private void lockUser(long userId) {
-        if (users.selectOneByQuery(QueryWrapper.create().select(column("id"))
-                .where(column("id").eq(userId)).forUpdate()) == null) {
-            throw com.wordtrail.security.JwtTokenService.unauthorized();
-        }
+        context.lockUser(userId);
     }
 
     private void requireCompleted(LearningBatch batch) {
@@ -226,10 +218,7 @@ public class LearningService {
     }
 
     private List<LearningBatchItem> entries(long batchId) {
-        // A created batch contains at most 100 items; one ordered read gives consistent
-        // counts, membership checks and the first unanswered item without N+1 queries.
-        return details.selectListByQuery(QueryWrapper.create().where(column("batch_id").eq(batchId))
-            .orderBy(column("sort_order").asc(), column("id").asc()));
+        return context.entries(batchId);
     }
 
     private LearningBatchItem findItem(List<LearningBatchItem> entries, long itemId) {
@@ -264,6 +253,7 @@ public class LearningService {
     @Transactional
     public BatchVO create(CreateBatchRequest request) {
         long userId = currentUser.id();
+        lockUser(userId);
         books.requireAccessible(request.getBookId(), userId);
         List<Long> selected;
         if (request.getSelectionType() == SelectionType.BOOK) {
@@ -298,6 +288,7 @@ public class LearningService {
         batch.setUserId(userId);
         batch.setBookId(bookId);
         batch.setSelectionType(selectionType);
+        batch.setTaskType("PRACTICE");
         batch.setStatus("IN_PROGRESS");
         if (batches.insertSelective(batch) != 1 || batch.getId() == null) {
             throw new IllegalStateException("Could not persist learning batch");
@@ -308,6 +299,8 @@ public class LearningService {
             item.setBatchId(batch.getId());
             item.setWordId(selected.get(index));
             item.setSortOrder(index + 1);
+            item.setQueueOrder((long) index + 1); item.setLearningStatus("PENDING");
+            item.setAnswerCount(0); item.setRelearnCount(0);
             entries.add(item);
         }
         if (details.insertBatch(entries) != entries.size()) {
