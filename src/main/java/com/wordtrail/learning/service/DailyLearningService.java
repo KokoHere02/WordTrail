@@ -11,7 +11,6 @@ import com.wordtrail.security.CurrentUser;
 import com.wordtrail.word.mapper.WordMapper;
 import java.time.*;
 import java.util.*;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -31,14 +30,13 @@ public class DailyLearningService {
     private final ReviewEvents events;
     private final ReviewScheduler scheduler;
     private final ObjectMapper json;
-    private final int target;
+    private final LearningSettingsService settings;
 
     public DailyLearningService(CurrentUser currentUser, LearningContext context, LearningBatchMapper batches,
             LearningBatchItemMapper items, UserWordStateMapper states, WordMapper words, ReviewEvents events,
-            ReviewScheduler scheduler, ObjectMapper json, @Value("${app.learning.daily-target:20}") int target) {
-        if (target < 1 || target > 100) { throw new IllegalStateException("DAILY_LEARNING_TARGET must be between 1 and 100"); }
+            ReviewScheduler scheduler, ObjectMapper json, LearningSettingsService settings) {
         this.currentUser=currentUser; this.context=context; this.batches=batches; this.items=items;
-        this.states=states; this.words=words; this.events=events; this.scheduler=scheduler; this.json=json; this.target=target;
+        this.states=states; this.words=words; this.events=events; this.scheduler=scheduler; this.json=json; this.settings=settings;
     }
 
     private QueryWrapper active(long userId) {
@@ -57,6 +55,7 @@ public class DailyLearningService {
     @Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
     public TodayVO today() {
         long userId=currentUser.id(); var now=context.now(); var batch=todayBatch(userId, now.toLocalDate(), false);
+        int target=batch==null ? settings.dailyTarget(userId) : batch.getDailyTarget();
         return new TodayVO(now.toLocalDate(), target, states.selectCountByQuery(active(userId)),
             states.selectCountByQuery(due(userId, now)),
             states.selectCountByQuery(active(userId).and(column("first_learned_at").isNull())),
@@ -69,6 +68,7 @@ public class DailyLearningService {
         var now=context.now(); var date=now.toLocalDate();
         var existing=todayBatch(userId, date, true);
         if(existing!=null) { return view(existing, context.entries(existing.getId())); }
+        int target=settings.dailyTarget(userId);
         var selected=new ArrayList<>(states.selectListByQuery(due(userId, now)
             .orderBy(column("next_review_at").asc(), column("id").asc()).limit(target)));
         int reviews=selected.size();
@@ -245,7 +245,7 @@ public class DailyLearningService {
             .map(LearningBatchItem::getId).orElse(null);
     }
     private DailyTaskVO view(LearningBatch batch,List<LearningBatchItem> entries) {
-        return new DailyTaskVO(batch.getId(),batch.getLearningDate(),batch.getTaskType(),batch.getStatus(),entries.size(),
+        return new DailyTaskVO(batch.getId(),batch.getLearningDate(),batch.getDailyTarget(),batch.getTaskType(),batch.getStatus(),entries.size(),
             entries.stream().filter(i->"DONE".equals(i.getLearningStatus())).count(),
             entries.stream().mapToLong(LearningBatchItem::getAnswerCount).sum(),
             entries.stream().filter(i->"DONE".equals(i.getLearningStatus()) && !Objects.equals(i.getResult(),1)).count(),
