@@ -11,6 +11,7 @@ public interface UserWordStateMapper extends BaseMapper<UserWordState> {
     String PLAN_FROM = """
         FROM user_word_state s INNER JOIN word w ON w.id = s.word_id
         WHERE s.user_id = #{userId} AND s.plan_status = #{status}
+        <if test="prefix != null">AND w.word LIKE #{prefix} ESCAPE '!'</if>
         <if test="learningStatus == 'NEW'">AND s.first_learned_at IS NULL</if>
         <if test="learningStatus == 'LEARNED'">AND s.first_learned_at IS NOT NULL</if>
         <if test="learningStatus == 'DUE'">
@@ -20,13 +21,26 @@ public interface UserWordStateMapper extends BaseMapper<UserWordState> {
 
     @Select("<script>SELECT COUNT(*) " + PLAN_FROM + "</script>")
     long countPlan(@Param("userId") long userId, @Param("status") String status,
-                   @Param("learningStatus") String learningStatus, @Param("now") LocalDateTime now);
+                   @Param("learningStatus") String learningStatus, @Param("now") LocalDateTime now,
+                   @Param("prefix") String prefix);
 
     @Select("""
         <script>SELECT s.word_id, w.word, w.phonetic, w.translation, s.plan_status, s.joined_at,
             s.first_learned_at, s.last_learned_at, s.last_result, s.next_review_at, s.review_level
-        """ + PLAN_FROM + " ORDER BY s.joined_at ASC, s.id ASC LIMIT #{limit} OFFSET #{offset}</script>")
+        """ + PLAN_FROM + """
+        ORDER BY
+        <choose>
+          <when test="sortBy == 'next_review_at'">
+            CASE WHEN s.next_review_at IS NULL THEN 1 ELSE 0 END ASC, s.next_review_at
+          </when>
+          <otherwise>s.joined_at</otherwise>
+        </choose>
+        <choose><when test="direction == 'ASC'">ASC</when><otherwise>DESC</otherwise></choose>,
+        s.id <choose><when test="direction == 'ASC'">ASC</when><otherwise>DESC</otherwise></choose>
+        LIMIT #{limit} OFFSET #{offset}</script>
+        """)
     List<PlanWordVO> planWords(@Param("userId") long userId, @Param("status") String status,
         @Param("learningStatus") String learningStatus, @Param("now") LocalDateTime now,
+        @Param("prefix") String prefix, @Param("sortBy") String sortBy, @Param("direction") String direction,
         @Param("offset") long offset, @Param("limit") int limit);
 }

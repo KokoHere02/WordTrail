@@ -22,4 +22,6 @@ public class LearningBatchItem {
     private Integer answerCount;
     private Integer relearnCount;
     private LocalDateTime completedAt;
+    private String statusBeforeSkip;
+    private LocalDateTime skippedAt;
 }

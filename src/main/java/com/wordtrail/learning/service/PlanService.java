@@ -25,10 +25,12 @@ public class PlanService {
     private final BookService books;
     private final WordBookItemMapper bookItems;
     private final UserWordStateMapper states;
+    private final DailyTaskPlanSync dailyQueue;
 
     @Transactional
     public JoinPlanVO join(JoinPlanRequest request) {
         long userId = currentUser.id(); context.lockUser(userId);
+        var now = context.now();
         books.requireAccessible(request.bookId(), userId);
         var ids = new LinkedHashSet<>(request.wordIds());
         if (ids.size() > 100) { throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", "每次最多加入 100 个不同单词"); }
@@ -43,7 +45,7 @@ public class PlanService {
             var state = existing.get(id);
             if (state == null) {
                 state = new UserWordState(); state.setUserId(userId); state.setWordId(id);
-                state.setPlanStatus("ACTIVE"); state.setJoinedAt(context.now()); state.setReviewLevel(0);
+                state.setPlanStatus("ACTIVE"); state.setJoinedAt(now); state.setReviewLevel(0);
                 if (states.insertSelective(state) != 1) { throw new IllegalStateException("Could not join learning plan"); }
                 added++;
             } else if (!"ACTIVE".equals(state.getPlanStatus())) {
@@ -52,27 +54,61 @@ public class PlanService {
                 reactivated++;
             }
         }
+        dailyQueue.apply(userId, ids, PlanStatus.ACTIVE, now);
         return new JoinPlanVO(ids.size(), added, reactivated, ids.size() - added - reactivated);
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public PageVO<PlanWordVO> list(PlanQuery query) {
         long userId = currentUser.id(); var now = context.now();
-        long count = states.countPlan(userId, query.getStatus().name(), query.getLearningStatus().name(), now);
+        String prefix = query.getKeyword() == null || query.getKeyword().isEmpty() ? null
+            : query.getKeyword().replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%";
+        long count = states.countPlan(userId, query.getStatus().name(), query.getLearningStatus().name(), now, prefix);
         long offset = ((long) query.getPage() - 1) * query.getSize();
         var records = offset >= count ? List.<PlanWordVO>of() : states.planWords(userId,
-            query.getStatus().name(), query.getLearningStatus().name(), now, offset, query.getSize());
+            query.getStatus().name(), query.getLearningStatus().name(), now, prefix, query.getSortBy(),
+            query.getDirection().name(), offset, query.getSize());
         return new PageVO<>(query.getPage(), query.getSize(), count, records);
     }
 
     @Transactional
     public void status(long wordId, PlanStatusRequest request) {
+        changeStatus(Set.of(wordId), request.status());
+    }
+
+    @Transactional
+    public BatchPlanStatusVO batchStatus(BatchPlanStatusRequest request) {
+        var ids = new LinkedHashSet<>(request.wordIds());
+        if (ids.size() > 100) { throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", "每次只能操作 1～100 个不同单词"); }
+        return changeStatus(ids, request.status());
+    }
+
+    private BatchPlanStatusVO changeStatus(Set<Long> ids, PlanStatus target) {
         long userId = currentUser.id(); context.lockUser(userId);
-        var state = states.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId))
-            .and(column("word_id").eq(wordId)));
-        if (state == null) { throw new BusinessException(HttpStatus.NOT_FOUND, "PLAN_WORD_NOT_FOUND", "计划中不存在该单词"); }
-        if (request.status().name().equals(state.getPlanStatus())) { return; }
-        var patch = new UserWordState(); patch.setId(state.getId()); patch.setPlanStatus(request.status().name());
-        if (states.update(patch) != 1) { throw new IllegalStateException("Could not update learning plan"); }
+        var now = context.now();
+        var selected = states.selectListByQuery(QueryWrapper.create().where(column("user_id").eq(userId))
+            .and(column("word_id").in(ids)));
+        if (selected.size() != ids.size()) {
+            throw new BusinessException(HttpStatus.NOT_FOUND, "PLAN_WORD_NOT_FOUND", "部分单词不在当前用户的计划中，未修改任何词");
+        }
+        var changed = new ArrayList<Long>();
+        for (var state : selected) {
+            String from = state.getPlanStatus();
+            if (target.name().equals(from)) { continue; }
+            boolean valid = target == PlanStatus.PAUSED && "ACTIVE".equals(from)
+                || target == PlanStatus.ACTIVE && "PAUSED".equals(from)
+                || target == PlanStatus.REMOVED && ("ACTIVE".equals(from) || "PAUSED".equals(from));
+            if (!valid) { throw LearningContext.conflict("INVALID_PLAN_TRANSITION", "计划状态转换不允许，未修改任何词；移出后请通过加入计划重新加入"); }
+            changed.add(state.getWordId());
+        }
+        if (!changed.isEmpty()) {
+            var patch = new UserWordState(); patch.setPlanStatus(target.name());
+            if (states.updateByQuery(patch, true, QueryWrapper.create().where(column("user_id").eq(userId))
+                    .and(column("word_id").in(changed))) != changed.size()) {
+                throw new IllegalStateException("Could not update all selected plan words");
+            }
+        }
+        dailyQueue.apply(userId, ids, target, now);
+        return new BatchPlanStatusVO(ids.size(), changed.size(), ids.size() - changed.size(), target);
     }
 }
