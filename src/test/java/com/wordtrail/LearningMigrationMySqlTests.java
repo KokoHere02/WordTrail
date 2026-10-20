@@ -56,6 +56,23 @@ class LearningMigrationMySqlTests {
             assertEquals("1", scalar(c, "SELECT first_learned_at IS NULL AND last_result IS NULL AND last_batch_item_id IS NULL AND last_learned_at IS NULL FROM user_word_state WHERE word_id=2"));
             run(c, new ClassPathResource("db/003_learning_plan_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
             run(c, new ClassPathResource("db/003_learning_plan_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            var beforeSettings = history(c);
+            run(c, new ClassPathResource("db/004_create_user_learning_setting.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeSettings, history(c));
+            assertEquals("0", scalar(c, "SELECT COUNT(*) FROM user_learning_setting"));
+            run(c, "INSERT INTO user_learning_setting(user_id) VALUES(1)");
+            assertEquals("20", scalar(c, "SELECT daily_target FROM user_learning_setting WHERE user_id=1"));
+            for (String invalid : List.of("0", "201", "NULL")) {
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                    () -> run(c, "UPDATE user_learning_setting SET daily_target=" + invalid + " WHERE user_id=1"));
+            }
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                () -> run(c, "INSERT INTO user_learning_setting(user_id) VALUES(1)"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                () -> run(c, "INSERT INTO user_learning_setting(user_id) VALUES(999999)"));
+            run(c, "UPDATE user_learning_setting SET daily_target=200 WHERE user_id=1");
+            assertEquals("200", scalar(c, "SELECT daily_target FROM user_learning_setting WHERE user_id=1"));
+            assertEquals(beforeSettings, history(c));
             // A fresh connection has no temporary guard table: refusal is due to upgraded structure.
             try (var second = DriverManager.getConnection(url,
                     System.getenv().getOrDefault("DB_USERNAME", "root"), System.getenv().getOrDefault("DB_PASSWORD", "root"))) {
@@ -66,6 +83,27 @@ class LearningMigrationMySqlTests {
             // Exclude the newly inserted plan row when comparing the preserved legacy history.
             assertEquals(before.get("batch"), history(c).get("batch"));
             assertEquals(before.get("item"), history(c).get("item"));
+            run(c, """
+                UPDATE user_word_state SET plan_status='PAUSED' WHERE user_id=1;
+                INSERT INTO learning_batch(id,user_id,selection_type,task_type,learning_date,daily_target)
+                  VALUES(2,1,'DAILY','DAILY',DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00')),20);
+                INSERT INTO learning_batch_item(id,batch_id,word_id,sort_order,item_type,learning_status,result,answered_at,completed_at)
+                  VALUES(3,2,1,1,'REVIEW','DONE',2,NOW(),NOW()),(4,2,2,2,'NEW','PENDING',NULL,NULL,NULL);
+                """);
+            var beforeSkip = history(c);
+            run(c, new ClassPathResource("db/005_plan_management_skip.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeSkip.get("state"), history(c).get("state"));
+            assertEquals(beforeSkip.get("item"), history(c).get("item"));
+            assertEquals(beforeSkip.get("batch").getFirst(), history(c).get("batch").getFirst());
+            assertEquals("SKIPPED", scalar(c, "SELECT learning_status FROM learning_batch_item WHERE id=3"));
+            assertEquals("DONE", scalar(c, "SELECT status_before_skip FROM learning_batch_item WHERE id=3"));
+            assertEquals("PENDING", scalar(c, "SELECT status_before_skip FROM learning_batch_item WHERE id=4"));
+            assertEquals("1", scalar(c, "SELECT completed_at IS NOT NULL FROM learning_batch_item WHERE id=3"));
+            assertEquals("1", scalar(c, "SELECT completed_at IS NULL FROM learning_batch_item WHERE id=4"));
+            assertEquals("COMPLETED", scalar(c, "SELECT status FROM learning_batch WHERE id=2"));
+            assertEquals("0", scalar(c, "SELECT COUNT(*) FROM word_review_log"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                () -> run(c, "UPDATE learning_batch_item SET status_before_skip=NULL WHERE id=3"));
         }
         // Keep the isolated schema for subsequent real-MySQL HTTP tests and manual inspection.
     }

@@ -109,6 +109,7 @@ class LearningIntegrationTests {
     private final HttpClient client = HttpClient.newHttpClient();
     private final List<Long> userIds = new ArrayList<>(), bookIds = new ArrayList<>(), wordIds = new ArrayList<>();
     @Autowired private javax.sql.DataSource dataSource;
+    @Autowired private UserLearningSettingMapper learningSettings;
     private long a, b, systemBook, ownBook, otherBook, emptyBook;
     private String tokenA, tokenB, prefix;
 
@@ -153,6 +154,7 @@ class LearningIntegrationTests {
         probe.failAfterMapper = null;
         probe.afterNextStateRead = null;
         if (!userIds.isEmpty()) {
+            learningSettings.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             reviewLogs.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds))
                 .and(column("event_type").eq("CORRECTION")));
             reviewLogs.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
@@ -1304,7 +1306,7 @@ class LearningIntegrationTests {
         joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong();
         dailyAnswer(batch,itemId(batch),1,1);
         var original=json.valueToTree(state(a,wordIds.get(1)));
-        for(String status:List.of("PAUSED","REMOVED","ACTIVE")) {
+        for(String status:List.of("PAUSED","ACTIVE","PAUSED","REMOVED")) {
             assertEquals(200,call("PATCH","/api/learning-plan/words/"+wordIds.get(1),Map.of("status",status),tokenA).statusCode());
             var after=json.valueToTree(state(a,wordIds.get(1)));
             assertEquals(original.get("joinedAt"),after.get("joinedAt")); assertEquals(original.get("nextReviewAt"),after.get("nextReviewAt"));
@@ -1450,7 +1452,10 @@ class LearningIntegrationTests {
         long next=startDay().get("batchId").asLong(); assertNotEquals(first,next);
         assertEquals("REVIEW",batchDetails(next).getFirst().getItemType());
         assertEquals(409,call("PUT",dailyItem(first,entries.get(1).getId())+"/answer",Map.of("result",1,"attemptNo",1,"requestId",requestId()),tokenA).statusCode());
-        assertEquals(saved,get(dailyPath(first),tokenA));
+        var historical=get(dailyPath(first),tokenA);
+        assertTrue(historical.get("nextItemId").isNull());
+        ((tools.jackson.databind.node.ObjectNode)saved).putNull("nextItemId");
+        assertEquals(saved,historical);
         advanceDays(10); long afterBreak=startDay().get("batchId").asLong();
         assertEquals(2,batchDetails(afterBreak).size());
         assertEquals(entries.getFirst().getWordId(),batchDetails(afterBreak).getFirst().getWordId());
@@ -1675,6 +1680,658 @@ class LearningIntegrationTests {
         assertEquals(15,done.get("answerCount").asInt());
         assertEquals(5,reviewLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))
             .and(column("affects_schedule").eq(true))));
+    }
+
+    private LocalDate statisticsDate() {
+        return clock.instant().atZone(ZoneId.of("Asia/Shanghai")).toLocalDate();
+    }
+
+    private JsonNode statisticsDaily(LocalDate date) throws Exception {
+        return get("/api/learning/statistics/daily?date="+date,tokenA);
+    }
+
+    private void assertStatistics(JsonNode stats,long completed,long answers,long fresh,long reviews,long unfamiliar) {
+        assertEquals(completed,stats.get("completedCount").asLong(),stats.toString());
+        assertEquals(answers,stats.get("answerCount").asLong(),stats.toString());
+        assertEquals(fresh,stats.get("newCompletedCount").asLong(),stats.toString());
+        assertEquals(reviews,stats.get("reviewCompletedCount").asLong(),stats.toString());
+        assertEquals(unfamiliar,stats.get("unfamiliarCount").asLong(),stats.toString());
+        assertEquals(completed,fresh+reviews);
+    }
+
+    @Test void statisticsEmptyDatesAndCalendarsReturnZerosWithoutCreatingRecords() throws Exception {
+        long before=countBatches(); int writes=probe.writes.get();
+        var day=statisticsDaily(statisticsDate());
+        assertStatistics(day,0,0,0,0,0);
+        assertFalse(day.get("hasLearningActivity").asBoolean());
+        assertTrue(day.get("statisticsComplete").asBoolean());
+        assertEquals(0,day.get("incompleteWordCount").asInt());
+        var calendar=get("/api/learning/statistics/calendar?month=2024-02",tokenA);
+        assertEquals(29,calendar.get("days").size());
+        for(var entry:calendar.get("days")) {
+            assertEquals(0,entry.get("completedCount").asInt());
+            assertEquals(0,entry.get("answerCount").asInt());
+            assertFalse(entry.get("hasLearningActivity").asBoolean());
+            assertTrue(entry.get("statisticsComplete").asBoolean());
+        }
+        assertEquals("2024-02-29",calendar.get("days").get(28).get("learningDate").asText());
+        assertEquals(31,get("/api/learning/statistics/calendar?month=9999-12",tokenA).get("days").size());
+        assertEquals(0,get("/api/learning/statistics/words",tokenA).get("total").asInt());
+        assertEquals(writes,probe.writes.get()); assertEquals(before,countBatches());
+    }
+
+    @Test void statisticsCountReinforcementAndUnfinishedWeakWordsWithoutDoubleCountingWords() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3));
+        var review=state(a,wordIds.get(2)); review.setFirstLearnedAt(LocalDateTime.of(2020,1,1,0,0));
+        review.setNextReviewAt(statisticsDate().minusDays(2).atStartOfDay()); states.update(review);
+        long batch=startDay().get("batchId").asLong(); var entries=batchDetails(batch);
+        assertEquals("REVIEW",entries.getFirst().getItemType());
+        dailyAnswer(batch,entries.get(0).getId(),1,1);
+        dailyAnswer(batch,entries.get(1).getId(),2,1);
+        assertStatistics(statisticsDaily(statisticsDate()),1,2,0,1,1);
+        var partial=get("/api/learning/statistics/words",tokenA);
+        assertEquals(2,partial.get("total").asInt());
+        assertFalse(partial.get("records").get(1).get("completed").asBoolean());
+        dailyAnswer(batch,entries.get(2).getId(),3,1);
+        dailyAnswer(batch,entries.get(1).getId(),1,2);
+        dailyAnswer(batch,entries.get(2).getId(),3,2);
+        dailyAnswer(batch,entries.get(2).getId(),3,3);
+        var result=statisticsDaily(statisticsDate());
+        assertStatistics(result,3,6,2,1,1);
+        assertTrue(result.get("hasLearningActivity").asBoolean());
+        assertTrue(result.get("statisticsComplete").asBoolean());
+        var learned=get("/api/learning/statistics/words",tokenA);
+        assertEquals(3,learned.get("total").asInt());
+        assertEquals(List.of(1,2,3),java.util.stream.StreamSupport.stream(learned.get("records").spliterator(),false)
+            .map(r->r.get("answerCount").asInt()).toList());
+        for(var word:learned.get("records")) {
+            assertTrue(word.get("completed").asBoolean());
+            assertTrue(word.get("statisticsComplete").asBoolean());
+            assertEquals("测试",word.get("translation").asText());
+        }
+    }
+
+    @Test void statisticsUseLatestCorrectedAnswerAndRetriesDoNotIncreaseCounts() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(),item=itemId(batch);
+        String request=requestId(); var first=dailyAnswer(batch,item,1,1,request);
+        long log=first.get("logId").asLong();
+        dailyAnswer(batch,item,1,1,request);
+        assertStatistics(statisticsDaily(statisticsDate()),1,1,1,0,0);
+        String correctionRequest=requestId(); correction(batch,item,log,3,correctionRequest);
+        correction(batch,item,log,3,correctionRequest);
+        assertStatistics(statisticsDaily(statisticsDate()),0,1,0,0,1);
+        var weak=get("/api/learning/statistics/words",tokenA).get("records").get(0);
+        assertEquals(3,weak.get("lastResult").asInt()); assertEquals(1,weak.get("answerCount").asInt());
+        assertFalse(weak.get("completed").asBoolean());
+        correction(batch,item,log,1,requestId());
+        assertStatistics(statisticsDaily(statisticsDate()),1,1,1,0,0);
+        correction(batch,item,log,3,requestId());
+        dailyAnswer(batch,item,1,2);
+        // A retry of an older correction returns its old event, without undoing the latest answer.
+        correction(batch,item,log,3,correctionRequest);
+        assertStatistics(statisticsDaily(statisticsDate()),1,2,1,0,0);
+        assertEquals(1,get("/api/learning/statistics/words",tokenA).get("records").get(0).get("lastResult").asInt());
+        assertEquals(409,call("PUT",dailyItem(batch,item)+"/correction",
+            Map.of("result",3,"logId",log,"requestId",requestId()),tokenA).statusCode());
+        assertTrue(statisticsDaily(statisticsDate()).get("statisticsComplete").asBoolean());
+    }
+
+    @Test void statisticsUseShanghaiDatesAndPreserveHistoryAcrossLeapDayAndMonthBoundary() throws Exception {
+        clock.at(Instant.parse("2024-02-28T15:59:59Z")); tokenA=jwt.issue(a);
+        joinPlan(wordIds.get(1)); long previous=startDay().get("batchId").asLong();
+        dailyAnswer(previous,itemId(previous),3,1);
+        assertEquals(LocalDate.of(2024,2,28),batches.selectOneById(previous).getLearningDate());
+        assertStatistics(statisticsDaily(LocalDate.of(2024,2,28)),0,1,0,0,1);
+        clock.advanceSeconds(2); tokenA=jwt.issue(a);
+        assertEquals("2024-02-29",get("/api/learning/statistics/daily",tokenA).get("learningDate").asText());
+        assertStatistics(statisticsDaily(LocalDate.of(2024,2,28)),0,1,0,0,1);
+        assertStatistics(statisticsDaily(statisticsDate()),0,0,0,0,0);
+        long today=startDay().get("batchId").asLong(); dailyAnswer(today,itemId(today),1,1);
+        assertStatistics(statisticsDaily(statisticsDate()),1,1,0,1,0);
+        assertEquals(3,get("/api/learning/statistics/words?date=2024-02-28",tokenA).get("records").get(0).get("lastResult").asInt());
+        var month=get("/api/learning/statistics/calendar",tokenA);
+        assertEquals("2024-02",month.get("month").asText()); assertEquals(29,month.get("days").size());
+        assertEquals(1,month.get("days").get(27).get("answerCount").asInt());
+        assertEquals(0,month.get("days").get(27).get("completedCount").asInt());
+        assertEquals(1,month.get("days").get(28).get("completedCount").asInt());
+        assertFalse(month.get("days").get(26).get("hasLearningActivity").asBoolean());
+        clock.at(Instant.parse("2024-02-29T16:00:01Z")); tokenA=jwt.issue(a);
+        assertEquals("2024-03-01",get("/api/learning/statistics/daily",tokenA).get("learningDate").asText());
+        assertEquals("2024-03",get("/api/learning/statistics/calendar",tokenA).get("month").asText());
+        assertStatistics(statisticsDaily(LocalDate.of(2024,2,29)),1,1,0,1,0);
+    }
+
+    @Test void statisticsIgnorePracticeAndCurrentWordMemory() throws Exception {
+        long practice=manualBatch(wordIds.get(1)); answer(practice,itemId(practice),3);
+        assertStatistics(statisticsDaily(statisticsDate()),0,0,0,0,0);
+        assertFalse(statisticsDaily(statisticsDate()).get("hasLearningActivity").asBoolean());
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); dailyAnswer(batch,itemId(batch),1,1);
+        var before=statisticsDaily(statisticsDate());
+        long anotherPractice=manualBatch(wordIds.get(1)); answer(anotherPractice,itemId(anotherPractice),2);
+        var memory=state(a,wordIds.get(1)); memory.setLastResult(3); memory.setPlanStatus("REMOVED"); states.update(memory);
+        assertEquals(before,statisticsDaily(statisticsDate()));
+        assertEquals(1,get("/api/learning/statistics/words",tokenA).get("records").get(0).get("lastResult").asInt());
+    }
+
+    @Test void statisticsReportPartialAndMissingEventsWithoutInventingAttempts() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(),item=itemId(batch);
+        long first=dailyAnswer(batch,item,3,1).get("logId").asLong();
+        dailyAnswer(batch,item,3,2); dailyAnswer(batch,item,3,3);
+        reviewLogs.deleteById(first); // Delete only this test fixture's event to model an incomplete import.
+        var partial=statisticsDaily(statisticsDate());
+        assertStatistics(partial,1,2,1,0,1);
+        assertFalse(partial.get("statisticsComplete").asBoolean());
+        assertEquals(1,partial.get("incompleteWordCount").asInt());
+        reviewLogs.deleteByQuery(QueryWrapper.create().where(column("batch_id").eq(batch)));
+        var missing=statisticsDaily(statisticsDate());
+        assertStatistics(missing,1,0,1,0,1);
+        assertTrue(missing.get("hasLearningActivity").asBoolean());
+        assertFalse(missing.get("statisticsComplete").asBoolean());
+        var word=get("/api/learning/statistics/words",tokenA).get("records").get(0);
+        assertEquals(0,word.get("answerCount").asInt()); assertEquals(3,word.get("lastResult").asInt());
+        assertFalse(word.get("statisticsComplete").asBoolean());
+        var month=get("/api/learning/statistics/calendar",tokenA);
+        assertFalse(month.get("statisticsComplete").asBoolean());
+        var day=month.get("days").get(statisticsDate().getDayOfMonth()-1);
+        assertEquals(0,day.get("answerCount").asInt()); assertTrue(day.get("hasLearningActivity").asBoolean());
+        assertFalse(day.get("statisticsComplete").asBoolean());
+    }
+
+    @Test void statisticsPaginateStudiedWordsOnlyAndUseBoundedReadQueries() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3)); long batch=startDay().get("batchId").asLong();
+        var entries=batchDetails(batch); dailyAnswer(batch,entries.get(0).getId(),1,1); dailyAnswer(batch,entries.get(1).getId(),1,1);
+        String memory=stateSnapshot(),queue=batchSnapshot(batch); long logs=logCount(batch);
+        probe.reads.set(0); int writes=probe.writes.get();
+        statisticsDaily(statisticsDate()); assertEquals(1,probe.reads.get());
+        probe.reads.set(0); get("/api/learning/statistics/calendar",tokenA); assertEquals(1,probe.reads.get());
+        probe.reads.set(0); var page=get("/api/learning/statistics/words?size=1&page=2",tokenA);
+        assertEquals(2,probe.reads.get()); assertEquals(2,page.get("total").asInt()); assertEquals(1,page.get("records").size());
+        assertEquals(entries.get(1).getWordId(),page.get("records").get(0).get("wordId").asLong());
+        probe.reads.set(0); var all=get("/api/learning/statistics/words?size=100",tokenA);
+        assertEquals(2,probe.reads.get()); assertEquals(2,all.get("records").size());
+        assertEquals(0,get("/api/learning/statistics/words?page=2147483647&size=100",tokenA).get("records").size());
+        assertEquals(writes,probe.writes.get());
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(batch)); assertEquals(logs,logCount(batch));
+    }
+
+    @Test void statisticsAreUserScopedAndRejectInvalidDatesMonthsAndPagination() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); dailyAnswer(batch,itemId(batch),1,1);
+        for(String path:List.of("/daily","/calendar","/words")) {
+            assertEquals(401,call("GET","/api/learning/statistics"+path,null,null).statusCode());
+        }
+        assertEquals(0,get("/api/learning/statistics/daily",tokenB).get("answerCount").asInt());
+        assertEquals(0,get("/api/learning/statistics/words",tokenB).get("total").asInt());
+        for(var day:get("/api/learning/statistics/calendar",tokenB).get("days")) assertFalse(day.get("hasLearningActivity").asBoolean());
+        assertEquals(statisticsDaily(statisticsDate()),get("/api/learning/statistics/daily?userId="+b,tokenA));
+        for(String date:List.of("","2025-02-29","2026-02-30","2026-13-01","2026-00-01","2026-1-01","0000-01-01","0999-12-31","10000-01-01","null")) {
+            for(String endpoint:List.of("daily","words")) {
+                var response=call("GET","/api/learning/statistics/"+endpoint+"?date="+date,null,tokenA);
+                assertEquals(400,response.statusCode(),response.body()+" date="+date);
+                assertEquals("INVALID_PARAMETER",json.readTree(response.body()).get("code").asText());
+            }
+        }
+        for(String month:List.of("","2026-00","2026-13","2026-2","2026-02-01","0000-01","10000-01","null")) {
+            assertEquals(400,call("GET","/api/learning/statistics/calendar?month="+month,null,tokenA).statusCode(),month);
+        }
+        for(String query:List.of("page=0","size=101","size=0","page=text")) {
+            assertEquals(400,call("GET","/api/learning/statistics/words?"+query,null,tokenA).statusCode());
+        }
+    }
+
+    @Test void statisticsKeepEffectiveFeedbackWhenCorrectionEventIsMissing() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(),item=itemId(batch);
+        long answerLog=dailyAnswer(batch,item,1,1).get("logId").asLong();
+        long correctionLog=correction(batch,item,answerLog,3,requestId()).get("logId").asLong();
+        reviewLogs.deleteById(correctionLog); // Simulate missing historical audit data for this fixture only.
+        var result=statisticsDaily(statisticsDate());
+        assertStatistics(result,0,1,0,0,1);
+        assertFalse(result.get("statisticsComplete").asBoolean());
+        assertEquals(1,result.get("incompleteWordCount").asInt());
+        var word=get("/api/learning/statistics/words",tokenA).get("records").get(0);
+        assertEquals(3,word.get("lastResult").asInt());
+        assertFalse(word.get("completed").asBoolean());
+        assertFalse(word.get("statisticsComplete").asBoolean());
+    }
+
+    @Test void statisticsSeparateUsersLearningTheSameWordWithTheSameRequestKey() throws Exception {
+        String key=requestId(); joinPlan(wordIds.get(2)); long batch=startDay().get("batchId").asLong();
+        dailyAnswer(batch,itemId(batch),1,1,key);
+        assertEquals(200,call("POST","/api/learning-plan/words",
+            Map.of("bookId",systemBook,"wordIds",List.of(wordIds.get(2))),tokenB).statusCode());
+        var start=call("POST","/api/learning/today/start",null,tokenB); assertEquals(200,start.statusCode(),start.body());
+        long otherBatch=json.readTree(start.body()).at("/data/batchId").asLong(),otherItem=itemId(otherBatch);
+        var body=Map.of("result",3,"attemptNo",1,"requestId",key);
+        assertEquals(200,call("PUT",dailyItem(otherBatch,otherItem)+"/answer",body,tokenB).statusCode());
+        assertEquals(200,call("PUT",dailyItem(otherBatch,otherItem)+"/answer",body,tokenB).statusCode());
+        assertStatistics(statisticsDaily(statisticsDate()),1,1,1,0,0);
+        assertStatistics(get("/api/learning/statistics/daily",tokenB),0,1,0,0,1);
+        var otherWords=get("/api/learning/statistics/words",tokenB);
+        assertEquals(1,otherWords.get("total").asInt());
+        assertEquals(3,otherWords.get("records").get(0).get("lastResult").asInt());
+        assertEquals(1,get("/api/learning/statistics/words",tokenA).get("records").get(0).get("lastResult").asInt());
+    }
+
+    private JsonNode updateSettings(int target) throws Exception {
+        var response=call("PUT","/api/learning/settings",Map.of("dailyTarget",target),tokenA);
+        assertEquals(200,response.statusCode(),response.body());
+        return json.readTree(response.body()).get("data");
+    }
+
+    private long settingsCount(long userId) {
+        return learningSettings.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(userId)));
+    }
+
+    @Test void settingsDefaultTo20WithoutPersistingOnReadsOrTaskCreation() throws Exception {
+        assertEquals(0,settingsCount(a)); int writes=probe.writes.get();
+        assertEquals(20,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+        assertEquals(20,get("/api/learning/today",tokenA).get("dailyTarget").asInt());
+        assertEquals(writes,probe.writes.get());
+        joinPlan(wordIds.get(1),wordIds.get(2)); var task=startDay();
+        assertEquals(20,task.get("dailyTarget").asInt());
+        assertEquals(20,batches.selectOneById(task.get("batchId").asLong()).getDailyTarget());
+        assertEquals(2,task.get("totalCount").asInt()); assertEquals(0,settingsCount(a));
+    }
+
+    @Test void settingsUpsertOneUserRowAndPreserveIdentityAndIdempotentTimestamps() throws Exception {
+        assertEquals(1,updateSettings(1).get("dailyTarget").asInt());
+        var first=learningSettings.selectOneById(a); assertEquals(a,first.getUserId());
+        clock.advanceSeconds(10); assertEquals(200,updateSettings(200).get("dailyTarget").asInt());
+        var changed=learningSettings.selectOneById(a);
+        assertEquals(first.getCreatedAt(),changed.getCreatedAt());
+        assertTrue(changed.getUpdatedAt().isAfter(first.getUpdatedAt()));
+        clock.advanceSeconds(10); updateSettings(200);
+        assertEquals(changed.getUpdatedAt(),learningSettings.selectOneById(a).getUpdatedAt());
+        assertEquals(1,settingsCount(a));
+        assertEquals(20,get("/api/learning/settings",tokenB).get("dailyTarget").asInt());
+        assertEquals(0,settingsCount(b));
+        assertEquals(200,get("/api/learning/settings?user_id="+b,tokenA).get("dailyTarget").asInt());
+        assertEquals(200,get("/api/learning/today",tokenA).get("dailyTarget").asInt());
+        var duplicate=new UserLearningSetting(); duplicate.setUserId(a); duplicate.setDailyTarget(20);
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->learningSettings.insertSelective(duplicate));
+    }
+
+    @Test void settingsRequireLoginAndStrictIntegerBodyWithoutClientIdentity() throws Exception {
+        assertEquals(401,call("GET","/api/learning/settings",null,null).statusCode());
+        assertEquals(401,call("PUT","/api/learning/settings",Map.of("dailyTarget",20),null).statusCode());
+        for(String body:List.of("{}","{\"dailyTarget\":null}","{\"dailyTarget\":0}","{\"dailyTarget\":-1}",
+                "{\"dailyTarget\":201}","{\"dailyTarget\":20.0}","{\"dailyTarget\":1.5}","{\"dailyTarget\":2e1}",
+                "{\"dailyTarget\":\"20\"}","{\"dailyTarget\":true}","{\"dailyTarget\":[]}","{\"dailyTarget\":{}}",
+                "{\"dailyTarget\":2147483648}","{\"dailyTarget\":20,\"user_id\":1}","{\"dailyTarget\":20,\"userId\":1}")) {
+            var request=HttpRequest.newBuilder(URI.create("http://localhost:"
+                +environment.getRequiredProperty("local.server.port")+"/api/learning/settings"))
+                .header("Authorization","Bearer "+tokenA).header("Content-Type","application/json")
+                .PUT(HttpRequest.BodyPublishers.ofString(body)).build();
+            var response=client.send(request,HttpResponse.BodyHandlers.ofString());
+            assertEquals(400,response.statusCode(),response.body()+" request="+body);
+            assertEquals("INVALID_PARAMETER",json.readTree(response.body()).get("code").asText());
+        }
+        assertEquals(0,settingsCount(a)); assertEquals(20,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+    }
+
+    @Test void settingsChangesLeaveEvenUnansweredTaskFrozenAndApplyToTheNextDay() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        updateSettings(2); var task=startDay(); long batch=task.get("batchId").asLong();
+        String queue=batchSnapshot(batch),memory=stateSnapshot(); long logs=logCount(batch);
+        for(int target:List.of(5,1,4)) {
+            updateSettings(target);
+            assertEquals(target,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+            assertEquals(2,get("/api/learning/today",tokenA).get("dailyTarget").asInt());
+            assertEquals(task,startDay());
+            assertEquals(queue,batchSnapshot(batch)); assertEquals(memory,stateSnapshot()); assertEquals(logs,logCount(batch));
+        }
+        advanceDays(1); assertEquals(4,get("/api/learning/today",tokenA).get("dailyTarget").asInt());
+        var next=startDay(); assertNotEquals(batch,next.get("batchId").asLong());
+        assertEquals(4,next.get("dailyTarget").asInt()); assertEquals(4,next.get("totalCount").asInt());
+        assertEquals(queue,batchSnapshot(batch)); assertEquals(2,batches.selectOneById(batch).getDailyTarget());
+    }
+
+    @Test void settingsNeverResetReinforcementOrCompletedTasksAndExtraAnswersDoNotConsumeTarget() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); updateSettings(1);
+        long batch=startDay().get("batchId").asLong(),item=itemId(batch);
+        dailyAnswer(batch,item,3,1); var saved=get(dailyPath(batch),tokenA); String queue=batchSnapshot(batch);
+        updateSettings(200); assertEquals(saved,startDay()); assertEquals(queue,batchSnapshot(batch));
+        dailyAnswer(batch,item,3,2); dailyAnswer(batch,item,1,3);
+        var complete=get(dailyPath(batch),tokenA);
+        assertEquals("COMPLETED",complete.get("status").asText());
+        assertEquals(1,complete.get("dailyTarget").asInt()); assertEquals(1,complete.get("totalCount").asInt());
+        assertEquals(3,complete.get("answerCount").asInt());
+        updateSettings(2); assertEquals(complete,startDay());
+        assertEquals(1,batchDetails(batch).size());
+        advanceDays(1); var next=startDay();
+        assertEquals(2,next.get("dailyTarget").asInt()); assertEquals(2,next.get("totalCount").asInt());
+        assertEquals(1,next.get("reviewCount").asInt()); assertEquals(1,next.get("newCount").asInt());
+        assertEquals(batchDetails(batch).getFirst().getWordId(),batchDetails(next.get("batchId").asLong()).getFirst().getWordId());
+    }
+
+    @Test void settingsSupport200DistinctWordsAndRetainOverdueReviewPriority() throws Exception {
+        var extras=new ArrayList<Long>();
+        for(int i=0;i<205;i++) { long id=word(prefix+"_setting_extra_"+i); associate(systemBook,id,100+i); extras.add(id); }
+        joinPlan(extras.subList(0,100).toArray(Long[]::new));
+        joinPlan(extras.subList(100,200).toArray(Long[]::new));
+        joinPlan(extras.subList(200,205).toArray(Long[]::new));
+        for(int i=200;i<205;i++) {
+            var state=state(a,extras.get(i)); state.setFirstLearnedAt(statisticsDate().minusDays(100).atStartOfDay());
+            state.setNextReviewAt(statisticsDate().minusDays(i-199).atStartOfDay()); states.update(state);
+        }
+        updateSettings(200); String memory=stateSnapshot(); var task=startDay();
+        assertEquals(200,task.get("dailyTarget").asInt()); assertEquals(200,task.get("totalCount").asInt());
+        assertEquals(5,task.get("reviewCount").asInt()); assertEquals(195,task.get("newCount").asInt());
+        var entries=batchDetails(task.get("batchId").asLong());
+        assertEquals(200,entries.stream().map(LearningBatchItem::getWordId).distinct().count());
+        assertEquals(extras.getLast(),entries.getFirst().getWordId());
+        assertEquals(memory,stateSnapshot());
+    }
+
+    @Test void settingsPersistAfterLogoutAndRelogin() throws Exception {
+        updateSettings(47);
+        var account=users.selectOneById(a); account.setPasswordHash(passwords.hash("password123")); users.update(account);
+        var credentials=Map.of("username",account.getUsername(),"password","password123");
+        var login=call("POST","/api/auth/login",credentials,null); assertEquals(200,login.statusCode());
+        var pair=json.readTree(login.body()).get("data"); tokenA=pair.get("accessToken").asText();
+        assertEquals(47,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+        assertEquals(200,call("POST","/api/auth/logout",Map.of("refreshToken",pair.get("refreshToken").asText()),null).statusCode());
+        var relogin=call("POST","/api/auth/login",credentials,null); assertEquals(200,relogin.statusCode());
+        tokenA=json.readTree(relogin.body()).at("/data/accessToken").asText();
+        assertEquals(47,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+        assertEquals(47,learningSettings.selectOneById(a).getDailyTarget()); assertEquals(1,settingsCount(a));
+    }
+
+    @Test void settingsConcurrentFirstUpdatesCreateOneRowAndTaskCreationUsesOneSnapshot() throws Exception {
+        var gate=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var first=pool.submit(()->{gate.await();return call("PUT","/api/learning/settings",Map.of("dailyTarget",1),tokenA);});
+            var second=pool.submit(()->{gate.await();return call("PUT","/api/learning/settings",Map.of("dailyTarget",200),tokenA);});
+            gate.countDown(); assertEquals(200,first.get(15,TimeUnit.SECONDS).statusCode());
+            assertEquals(200,second.get(15,TimeUnit.SECONDS).statusCode());
+        }
+        assertEquals(1,settingsCount(a));
+        assertTrue(Set.of(1,200).contains(get("/api/learning/settings",tokenA).get("dailyTarget").asInt()));
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5)); updateSettings(2);
+        var race=new CountDownLatch(1); JsonNode created;
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var setting=pool.submit(()->{race.await();return call("PUT","/api/learning/settings",Map.of("dailyTarget",4),tokenA);});
+            var start=pool.submit(()->{race.await();return call("POST","/api/learning/today/start",null,tokenA);});
+            race.countDown(); assertEquals(200,setting.get(15,TimeUnit.SECONDS).statusCode());
+            var response=start.get(15,TimeUnit.SECONDS); assertEquals(200,response.statusCode(),response.body());
+            created=json.readTree(response.body()).get("data");
+        }
+        int target=created.get("dailyTarget").asInt(); assertTrue(Set.of(2,4).contains(target));
+        assertEquals(target,created.get("totalCount").asInt());
+        assertEquals(4,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+        assertEquals(created,startDay()); assertEquals(1,settingsCount(a));
+    }
+
+    @Test void settingsWriteFailuresRollBackBothInsertAndUpdate() throws Exception {
+        probe.failAfterMapper="com.wordtrail.learning.mapper.UserLearningSettingMapper";
+        try { assertEquals(500,call("PUT","/api/learning/settings",Map.of("dailyTarget",30),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; }
+        assertEquals(0,settingsCount(a)); assertEquals(20,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+        updateSettings(30); var before=json.valueToTree(learningSettings.selectOneById(a)); clock.advanceSeconds(10);
+        probe.failAfterMapper="com.wordtrail.learning.mapper.UserLearningSettingMapper";
+        try { assertEquals(500,call("PUT","/api/learning/settings",Map.of("dailyTarget",100),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; }
+        assertEquals(before,json.valueToTree(learningSettings.selectOneById(a)));
+    }
+
+    private JsonNode planManagementStatus(String target,Long... ids) throws Exception {
+        var response=call("PATCH","/api/learning-plan/words/status",Map.of("status",target,"wordIds",List.of(ids)),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return json.readTree(response.body()).get("data");
+    }
+
+    private List<Long> planWordIds(JsonNode page) {
+        var ids=new ArrayList<Long>(); page.get("records").forEach(row->ids.add(row.get("wordId").asLong())); return ids;
+    }
+
+    @Test void planManagementSearchEscapesWildcardsAndSortsStablyWithNullDueDatesLast() throws Exception {
+        joinPlan(wordIds.subList(0,7).toArray(Long[]::new));
+        assertEquals(2,get("/api/learning-plan/words?keyword="+encoded(prefix+"a"),tokenA).get("total").asInt());
+        for(int i=3;i<=6;i++) {
+            String character=List.of("%","_","!","\\").get(i-3);
+            assertEquals(List.of(wordIds.get(i)),planWordIds(get("/api/learning-plan/words?keyword="+encoded(prefix+character),tokenA)));
+        }
+        assertEquals(0,get("/api/learning-plan/words?keyword="+encoded(prefix+"%' OR 1=1 --"),tokenA).get("total").asInt());
+        planManagementStatus("PAUSED",wordIds.get(3)); planManagementStatus("REMOVED",wordIds.get(4));
+        assertEquals(List.of(wordIds.get(3)),planWordIds(get("/api/learning-plan/words?status=PAUSED",tokenA)));
+        assertEquals(List.of(wordIds.get(4)),planWordIds(get("/api/learning-plan/words?status=REMOVED",tokenA)));
+        var base=LocalDateTime.of(2025,1,1,0,0);
+        var selected=List.of(wordIds.get(1),wordIds.get(2),wordIds.get(5),wordIds.get(6));
+        for(int i=0;i<4;i++) {
+            var state=state(a,selected.get(i)); state.setJoinedAt(base.plusDays(i<2?0:i));
+            state.setNextReviewAt(i==0?null:base.plusDays(i==1?2:1));
+            states.updateByQuery(state,false,QueryWrapper.create().where(column("id").eq(state.getId())));
+        }
+        String query="/api/learning-plan/words?learningStatus=NEW";
+        assertEquals(List.of(selected.get(3),selected.get(2),selected.get(1),selected.get(0)),planWordIds(get(query,tokenA)));
+        assertEquals(selected,planWordIds(get(query+"&sortBy=joined_at&direction=ASC",tokenA)));
+        assertEquals(List.of(selected.get(2),selected.get(3),selected.get(1),selected.get(0)),
+            planWordIds(get(query+"&sortBy=next_review_at&direction=ASC",tokenA)));
+        assertEquals(List.of(selected.get(1),selected.get(3),selected.get(2),selected.get(0)),
+            planWordIds(get(query+"&sortBy=next_review_at&direction=DESC",tokenA)));
+        var one=planWordIds(get(query+"&sortBy=next_review_at&direction=ASC&size=2",tokenA));
+        var two=planWordIds(get(query+"&sortBy=next_review_at&direction=ASC&size=2&page=2",tokenA));
+        assertEquals(List.of(selected.get(2),selected.get(3)),one); assertEquals(List.of(selected.get(1),selected.get(0)),two);
+        assertEquals(one,planWordIds(get(query+"&sortBy=next_review_at&direction=ASC&size=2",tokenA)));
+        for(String invalid:List.of("sortBy=word","sortBy="+encoded("next_review_at DESC"),"direction=DOWN","direction=desc","keyword="+"a".repeat(256))) {
+            assertEquals(400,call("GET","/api/learning-plan/words?"+invalid,null,tokenA).statusCode());
+        }
+    }
+
+    @Test void planManagementBatchTransitionsAreAtomicIdempotentAndUserScoped() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3));
+        var first=planManagementStatus("PAUSED",wordIds.get(1),wordIds.get(2),wordIds.get(1));
+        assertEquals(2,first.get("requestedCount").asInt()); assertEquals(2,first.get("changedCount").asInt());
+        String snapshot=stateSnapshot(); clock.advanceSeconds(10);
+        var retry=planManagementStatus("PAUSED",wordIds.get(1),wordIds.get(2));
+        assertEquals(0,retry.get("changedCount").asInt()); assertEquals(2,retry.get("unchangedCount").asInt());
+        assertEquals(snapshot,stateSnapshot());
+        planManagementStatus("ACTIVE",wordIds.get(1));
+        planManagementStatus("REMOVED",wordIds.get(1),wordIds.get(2));
+        planManagementStatus("PAUSED",wordIds.get(3)); snapshot=stateSnapshot();
+        assertEquals(409,call("PATCH","/api/learning-plan/words/status",
+            Map.of("status","ACTIVE","wordIds",List.of(wordIds.get(1),wordIds.get(3))),tokenA).statusCode());
+        assertEquals(snapshot,stateSnapshot());
+        assertEquals(404,call("PATCH","/api/learning-plan/words/status",
+            Map.of("status","REMOVED","wordIds",List.of(wordIds.get(3),wordIds.get(7))),tokenA).statusCode());
+        assertEquals(404,call("PATCH","/api/learning-plan/words/status",
+            Map.of("status","REMOVED","wordIds",List.of(wordIds.get(2))),tokenB).statusCode());
+        assertEquals(snapshot,stateSnapshot());
+        assertEquals(409,call("PATCH","/api/learning-plan/words/"+wordIds.get(1),Map.of("status","ACTIVE"),tokenA).statusCode());
+        assertEquals(409,call("PATCH","/api/learning-plan/words/status",
+            Map.of("status","PAUSED","wordIds",List.of(wordIds.get(1))),tokenA).statusCode());
+    }
+
+    @Test void planManagementBatchValidatesPayloadAndSupports100DistinctWords() throws Exception {
+        var extras=new ArrayList<Long>();
+        for(int i=0;i<100;i++) { long id=word(prefix+"_bulk_"+i); associate(systemBook,id,100+i); extras.add(id); }
+        joinPlan(extras.toArray(Long[]::new));
+        var repeated=new ArrayList<>(extras); repeated.addAll(extras);
+        var response=call("PATCH","/api/learning-plan/words/status",Map.of("status","PAUSED","wordIds",repeated),tokenA);
+        assertEquals(200,response.statusCode(),response.body());
+        assertEquals(100,json.readTree(response.body()).at("/data/changedCount").asInt());
+        assertEquals(100,get("/api/learning-plan/words?status=PAUSED",tokenA).get("total").asInt());
+        for(Object body:List.of(Map.of("status","ACTIVE","wordIds",List.of()),Map.of("wordIds",List.of(wordIds.get(1))),
+                Map.of("status","INVALID","wordIds",List.of(wordIds.get(1))),Map.of("status","ACTIVE","wordIds",List.of(0)),
+                Map.of("status","ACTIVE","wordIds",java.util.stream.LongStream.rangeClosed(1,101).boxed().toList()),
+                Map.of("status","ACTIVE","wordIds",List.of(wordIds.get(1)),"user_id",b),
+                json.readTree("{\"status\":\"ACTIVE\",\"wordIds\":[null]}"))) {
+            assertEquals(400,call("PATCH","/api/learning-plan/words/status",body,tokenA).statusCode());
+        }
+        assertEquals(401,call("PATCH","/api/learning-plan/words/status",Map.of("status","PAUSED","wordIds",extras),null).statusCode());
+    }
+
+    @Test void planManagementResumePreservesMemoryAndKeepsOverdueReviewDates() throws Exception {
+        joinPlan(wordIds.get(1)); var state=state(a,wordIds.get(1));
+        state.setFirstLearnedAt(statisticsDate().minusDays(100).atStartOfDay());
+        state.setLastLearnedAt(statisticsDate().minusDays(10).atStartOfDay());
+        state.setNextReviewAt(statisticsDate().minusDays(5).atStartOfDay()); state.setLastResult(2); state.setReviewLevel(2); states.update(state);
+        var original=json.valueToTree(state(a,wordIds.get(1)));
+        planManagementStatus("PAUSED",wordIds.get(1)); assertEquals(0,get("/api/learning/today",tokenA).get("dueCount").asInt());
+        planManagementStatus("ACTIVE",wordIds.get(1));
+        var after=json.valueToTree(state(a,wordIds.get(1)));
+        for(String field:List.of("joinedAt","firstLearnedAt","lastLearnedAt","lastResult","lastBatchItemId","reviewLevel","nextReviewAt")) {
+            assertEquals(original.get(field),after.get(field),field);
+        }
+        assertEquals(1,get("/api/learning/today",tokenA).get("dueCount").asInt());
+        var task=startDay(); assertEquals(1,task.get("reviewCount").asInt());
+        assertEquals(original.get("nextReviewAt"),json.valueToTree(state(a,wordIds.get(1))).get("nextReviewAt"));
+    }
+
+    @Test void planManagementSkipAndResumePendingAndRelearningWordsWithoutResettingQueue() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3)); long batch=startDay().get("batchId").asLong();
+        var entries=batchDetails(batch); long first=entries.get(0).getId(),second=entries.get(1).getId(),word=entries.get(0).getWordId();
+        var original=json.valueToTree(details.selectOneById(first));
+        planManagementStatus("PAUSED",word); var skipped=details.selectOneById(first);
+        assertEquals("SKIPPED",skipped.getLearningStatus()); assertEquals("PENDING",skipped.getStatusBeforeSkip());
+        assertNotNull(skipped.getSkippedAt());
+        var progress=get(dailyPath(batch),tokenA); assertEquals(1,progress.get("skippedCount").asInt());
+        assertEquals(0,progress.get("completedCount").asInt()); assertEquals(second,progress.get("nextItemId").asLong());
+        String queue=batchSnapshot(batch); clock.advanceSeconds(10); planManagementStatus("PAUSED",word); assertEquals(queue,batchSnapshot(batch));
+        var stale=call("PUT",dailyItem(batch,first)+"/answer",Map.of("result",1,"attemptNo",1,"requestId",requestId()),tokenA);
+        assertEquals(409,stale.statusCode()); assertEquals("PLAN_WORD_UNAVAILABLE",json.readTree(stale.body()).get("code").asText());
+        var detail=get(dailyItem(batch,first),tokenA); assertTrue(detail.get("nextAttemptNo").isNull()); assertTrue(detail.get("correctableLogId").isNull());
+        assertEquals(0,logCount(batch)); assertNull(state(a,word).getFirstLearnedAt());
+        var stats=statisticsDaily(statisticsDate()); assertStatistics(stats,0,0,0,0,0);
+        assertFalse(stats.get("hasLearningActivity").asBoolean()); assertTrue(stats.get("statisticsComplete").asBoolean());
+        assertEquals(0,get("/api/learning/statistics/words",tokenA).get("total").asInt());
+        planManagementStatus("ACTIVE",word); assertEquals(original,json.valueToTree(details.selectOneById(first)));
+        assertEquals(first,get(dailyPath(batch),tokenA).get("nextItemId").asLong());
+        dailyAnswer(batch,first,3,1); var reinforcing=details.selectOneById(first); var memory=json.valueToTree(state(a,word));
+        planManagementStatus("PAUSED",word); assertEquals("RELEARNING",details.selectOneById(first).getStatusBeforeSkip());
+        planManagementStatus("ACTIVE",word);
+        assertEquals(json.valueToTree(reinforcing),json.valueToTree(details.selectOneById(first)));
+        assertEquals(memory,json.valueToTree(state(a,word))); assertEquals(1,logCount(batch));
+        assertEquals(second,get(dailyPath(batch),tokenA).get("nextItemId").asLong());
+    }
+
+    @Test void planManagementSkippedCompletedWordIsNotCountedCompleteAndCanResumeWhileTaskOpen() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong(); var first=batchDetails(batch).getFirst();
+        long log=dailyAnswer(batch,first.getId(),1,1).get("logId").asLong();
+        var completed=details.selectOneById(first.getId());
+        planManagementStatus("PAUSED",first.getWordId());
+        assertEquals("SKIPPED",details.selectOneById(first.getId()).getLearningStatus());
+        assertEquals(completed.getCompletedAt(),details.selectOneById(first.getId()).getCompletedAt());
+        assertEquals(0,get(dailyPath(batch),tokenA).get("completedCount").asInt());
+        assertStatistics(statisticsDaily(statisticsDate()),0,1,0,0,0);
+        assertEquals(409,call("PUT",dailyItem(batch,first.getId())+"/correction",
+            Map.of("result",3,"logId",log,"requestId",requestId()),tokenA).statusCode());
+        planManagementStatus("ACTIVE",first.getWordId());
+        assertEquals(json.valueToTree(completed),json.valueToTree(details.selectOneById(first.getId())));
+        assertEquals(1,get(dailyPath(batch),tokenA).get("completedCount").asInt()); assertEquals(1,logCount(batch));
+    }
+
+    @Test void planManagementRemovalRejoinAndClosedTaskRestorationFollowOneRule() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong(); var entries=batchDetails(batch);
+        long first=entries.get(0).getWordId(),second=entries.get(1).getWordId();
+        planManagementStatus("REMOVED",first);
+        assertEquals(entries.get(1).getId(),get(dailyPath(batch),tokenA).get("nextItemId").asLong());
+        assertEquals(409,call("PATCH","/api/learning-plan/words/status",Map.of("status","ACTIVE","wordIds",List.of(first)),tokenA).statusCode());
+        assertEquals(1,joinPlan(first).get("reactivatedCount").asInt());
+        assertEquals(entries.get(0).getId(),get(dailyPath(batch),tokenA).get("nextItemId").asLong());
+        planManagementStatus("PAUSED",first,second); var ended=get(dailyPath(batch),tokenA);
+        assertEquals("COMPLETED",ended.get("status").asText()); assertEquals(2,ended.get("skippedCount").asInt());
+        assertEquals(0,ended.get("completedCount").asInt()); assertTrue(ended.get("nextItemId").isNull());
+        String queue=batchSnapshot(batch); planManagementStatus("ACTIVE",first,second);
+        assertEquals(ended,startDay()); assertEquals(queue,batchSnapshot(batch));
+        assertEquals(409,call("PUT",dailyItem(batch,entries.get(0).getId())+"/answer",
+            Map.of("result",1,"attemptNo",1,"requestId",requestId()),tokenA).statusCode());
+        advanceDays(1); var next=startDay(); assertNotEquals(batch,next.get("batchId").asLong()); assertEquals(2,next.get("newCount").asInt());
+        assertEquals(queue,batchSnapshot(batch));
+    }
+
+    @Test void planManagementPauseFinishedTaskPreservesAnswersAndResumeDoesNotReopenIt() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); long item=itemId(batch);
+        dailyAnswer(batch,item,3,1); dailyAnswer(batch,item,3,2); dailyAnswer(batch,item,3,3);
+        var finished=batches.selectOneById(batch).getCompletedAt(); var answerTime=details.selectOneById(item).getAnsweredAt();
+        planManagementStatus("PAUSED",wordIds.get(1)); var task=get(dailyPath(batch),tokenA);
+        assertEquals("COMPLETED",task.get("status").asText()); assertEquals(0,task.get("completedCount").asInt());
+        assertEquals(1,task.get("skippedCount").asInt()); assertEquals(3,task.get("answerCount").asInt());
+        assertEquals(finished,batches.selectOneById(batch).getCompletedAt()); assertEquals(answerTime,details.selectOneById(item).getAnsweredAt());
+        assertStatistics(statisticsDaily(statisticsDate()),0,3,0,0,1);
+        planManagementStatus("ACTIVE",wordIds.get(1)); assertEquals(task,startDay());
+        var oldQueue=batchSnapshot(batch); advanceDays(1); planManagementStatus("PAUSED",wordIds.get(1));
+        assertEquals(oldQueue,batchSnapshot(batch)); planManagementStatus("ACTIVE",wordIds.get(1));
+        var next=startDay(); assertEquals(1,next.get("reviewCount").asInt()); assertEquals(oldQueue,batchSnapshot(batch));
+    }
+
+    @Test void planManagementPriorDayQueueRemainsHistoricalAndNeverReturnsAnActionableNextWord() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong(); var first=batchDetails(batch).getFirst();
+        String before=batchSnapshot(batch); advanceDays(1); planManagementStatus("PAUSED",first.getWordId());
+        assertEquals(before,batchSnapshot(batch));
+        assertTrue(get(dailyPath(batch),tokenA).get("nextItemId").isNull());
+        var item=get(dailyItem(batch,first.getId()),tokenA);
+        assertTrue(item.get("nextItemId").isNull()); assertTrue(item.get("nextAttemptNo").isNull());
+        assertTrue(get("/api/learning/daily-tasks",tokenA).get("records").get(0).get("nextItemId").isNull());
+        long today=startDay().get("batchId").asLong();
+        assertEquals(1,batchDetails(today).size()); assertNotEquals(first.getWordId(),batchDetails(today).getFirst().getWordId());
+        assertEquals(before,batchSnapshot(batch)); assertEquals(0,logCount(batch));
+    }
+
+    @Test void planManagementFailuresRollBackPlanQueueAndBatchTogether() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong();
+        String memory=stateSnapshot(),queue=batchSnapshot(batch);
+        for(String mapper:List.of("UserWordStateMapper","LearningBatchItemMapper","LearningBatchMapper")) {
+            probe.failAfterMapper="com.wordtrail.learning.mapper."+mapper;
+            try { assertEquals(500,call("PATCH","/api/learning-plan/words/status",
+                Map.of("status","PAUSED","wordIds",List.of(wordIds.get(1),wordIds.get(2))),tokenA).statusCode()); }
+            finally { probe.failAfterMapper=null; }
+            assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(batch)); assertEquals(0,logCount(batch));
+        }
+        planManagementStatus("PAUSED",wordIds.get(1),wordIds.get(2));
+        assertEquals(2,get(dailyPath(batch),tokenA).get("skippedCount").asInt());
+    }
+
+    @Test void planManagementConcurrentPauseAndAnswerNeverScheduleAfterPause() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong(); var entries=batchDetails(batch); var first=entries.getFirst();
+        var gate=new CountDownLatch(1); int answerCode;
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var pause=pool.submit(()->{gate.await();return call("PATCH","/api/learning-plan/words/status",Map.of("status","PAUSED","wordIds",List.of(first.getWordId())),tokenA);});
+            var answer=pool.submit(()->{gate.await();return call("PUT",dailyItem(batch,first.getId())+"/answer",Map.of("result",1,"attemptNo",1,"requestId",requestId()),tokenA);});
+            gate.countDown(); assertEquals(200,pause.get(15,TimeUnit.SECONDS).statusCode()); answerCode=answer.get(15,TimeUnit.SECONDS).statusCode();
+        }
+        assertTrue(Set.of(200,409).contains(answerCode)); assertEquals(answerCode==200?1:0,logCount(batch));
+        assertEquals("SKIPPED",details.selectOneById(first.getId()).getLearningStatus());
+        assertEquals("PAUSED",state(a,first.getWordId()).getPlanStatus());
+        assertEquals(entries.get(1).getId(),get(dailyPath(batch),tokenA).get("nextItemId").asLong());
+    }
+
+    @Test void wordHistoryIncludesPracticeDailyAndCorrectionEventsWithAvailableSchedules() throws Exception {
+        long word=wordIds.get(1),practice=manualBatch(word); answer(practice,itemId(practice),1); answer(practice,itemId(practice),2);
+        joinPlan(word); var state=state(a,word); state.setFirstLearnedAt(statisticsDate().minusDays(10).atStartOfDay());
+        state.setNextReviewAt(statisticsDate().minusDays(2).atStartOfDay()); state.setReviewLevel(2); states.update(state);
+        long batch=startDay().get("batchId").asLong(),item=itemId(batch); long normal=dailyAnswer(batch,item,1,1).get("logId").asLong();
+        long changed=correction(batch,item,normal,3,requestId()).get("logId").asLong();
+        String path="/api/learning-plan/words/"+word+"/history";
+        int writes=probe.writes.get(); probe.reads.set(0);
+        var page=get(path+"?size=2",tokenA); assertEquals(2,probe.reads.get()); assertEquals(4,page.get("total").asInt());
+        var latest=page.get("records").get(0); assertEquals(changed,latest.get("logId").asLong());
+        assertEquals("CORRECTION",latest.get("eventType").asText()); assertEquals(normal,latest.get("correctsLogId").asLong());
+        assertEquals("DAILY",latest.get("taskType").asText()); assertTrue(latest.get("affectsSchedule").asBoolean());
+        assertTrue(latest.get("scheduleAvailable").asBoolean());
+        assertEquals(3,latest.at("/scheduleBefore/reviewLevel").asInt()); assertEquals(0,latest.at("/scheduleAfter/reviewLevel").asInt());
+        assertEquals(1,page.get("records").get(1).get("result").asInt());
+        var older=get(path+"?size=2&page=2",tokenA).get("records");
+        assertEquals("PRACTICE",older.get(0).get("taskType").asText()); assertEquals("CORRECTION",older.get(0).get("eventType").asText());
+        assertFalse(older.get(0).get("affectsSchedule").asBoolean()); assertFalse(older.get(0).get("scheduleAvailable").asBoolean());
+        assertTrue(older.get(0).get("scheduleBefore").isNull()); assertEquals("ANSWER",older.get(1).get("eventType").asText());
+        probe.reads.set(0); var all=get(path+"?size=100",tokenA); assertEquals(2,probe.reads.get()); assertEquals(4,all.get("records").size());
+        assertEquals(writes,probe.writes.get());
+        assertEquals(0,get(path,tokenB).get("total").asInt());
+        assertEquals(all,get(path+"?size=100&user_id="+b,tokenA));
+        assertEquals(0,get(path+"?page=2147483647",tokenA).get("records").size());
+    }
+
+    @Test void wordHistoryDoesNotFabricateLegacyEventsOrMissingSchedulesAndValidatesPagination() throws Exception {
+        assertEquals(0,get("/api/learning-plan/words/"+wordIds.get(0)+"/history",tokenA).get("total").asInt());
+        long word=wordIds.get(1); joinPlan(word); long batch=startDay().get("batchId").asLong();
+        long log=dailyAnswer(batch,itemId(batch),1,1).get("logId").asLong();
+        var patch=new WordReviewLog(); patch.setId(log); patch.setScheduleBefore("\"legacy\""); reviewLogs.update(patch);
+        String path="/api/learning-plan/words/"+word+"/history"; var row=get(path,tokenA).get("records").get(0);
+        assertFalse(row.get("scheduleAvailable").asBoolean()); assertTrue(row.get("scheduleBefore").isNull());
+        planManagementStatus("REMOVED",word); assertEquals(1,get(path,tokenA).get("total").asInt());
+        assertEquals(0,get("/api/learning-plan/words/"+Long.MAX_VALUE+"/history",tokenA).get("total").asInt());
+        for(String query:List.of("page=0","size=101","size=0","page=text")) assertEquals(400,call("GET",path+"?"+query,null,tokenA).statusCode());
+        assertEquals(400,call("GET","/api/learning-plan/words/0/history",null,tokenA).statusCode());
+        assertEquals(401,call("GET",path,null,null).statusCode());
     }
 
     private void rollbackAfterWrite(String mapper) throws Exception {
