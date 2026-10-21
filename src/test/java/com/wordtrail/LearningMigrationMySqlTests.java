@@ -104,6 +104,15 @@ class LearningMigrationMySqlTests {
             assertEquals("0", scalar(c, "SELECT COUNT(*) FROM word_review_log"));
             assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
                 () -> run(c, "UPDATE learning_batch_item SET status_before_skip=NULL WHERE id=3"));
+            var beforeReinforcement = history(c);
+            run(c, new ClassPathResource("db/006_daily_reinforcement.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeReinforcement, history(c));
+            assertEquals("0", scalar(c, "SELECT COUNT(*) FROM learning_batch_item WHERE reinforcement_remaining IS NOT NULL OR completion_reason IS NOT NULL"));
+            run(c, "UPDATE learning_batch_item SET reinforcement_remaining=2,completion_reason='LIMIT_REACHED' WHERE id=3");
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                () -> run(c, "UPDATE learning_batch_item SET reinforcement_remaining=4 WHERE id=3"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                () -> run(c, "UPDATE learning_batch_item SET completion_reason='MASTERED' WHERE id=3"));
         }
         // Keep the isolated schema for subsequent real-MySQL HTTP tests and manual inspection.
     }
