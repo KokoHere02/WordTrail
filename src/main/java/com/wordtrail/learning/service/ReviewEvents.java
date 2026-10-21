@@ -4,6 +4,9 @@ import com.mybatisflex.core.query.QueryWrapper;
 import com.wordtrail.learning.entity.*;
 import com.wordtrail.learning.mapper.WordReviewLogMapper;
 import java.util.Objects;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.time.LocalDateTime;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -35,6 +38,19 @@ public class ReviewEvents {
     public WordReviewLog latestAnswer(long userId) {
         return logs.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId))
             .and(column("event_type").eq("ANSWER")).orderBy(column("id").desc()).limit(1));
+    }
+
+    // Used only to initialize an unfinished pre-upgrade item, never to invent missing history.
+    public List<Integer> effectiveItemAnswers(long userId, long itemId) {
+        var effective = new LinkedHashMap<Long, Integer>();
+        for (var event : logs.selectListByQuery(QueryWrapper.create().where(column("user_id").eq(userId))
+                .and(column("batch_item_id").eq(itemId)).orderBy(column("id").asc()))) {
+            if ("ANSWER".equals(event.getEventType())) { effective.put(event.getId(), event.getResult()); }
+            else if (effective.containsKey(event.getCorrectsLogId())) {
+                effective.put(event.getCorrectsLogId(), event.getResult());
+            }
+        }
+        return new ArrayList<>(effective.values());
     }
 
     public WordReviewLog append(long userId, LearningBatchItem item, String requestId,

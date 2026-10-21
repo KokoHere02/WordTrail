@@ -24,4 +24,6 @@ public class LearningBatchItem {
     private LocalDateTime completedAt;
     private String statusBeforeSkip;
     private LocalDateTime skippedAt;
+    private Integer reinforcementRemaining;
+    private String completionReason;
 }
