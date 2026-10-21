@@ -58,10 +58,14 @@ public class DailyLearningService {
     public TodayVO today() {
         long userId=currentUser.id(); var now=context.now(); var batch=todayBatch(userId, now.toLocalDate(), false);
         int target=batch==null ? settings.dailyTarget(userId) : batch.getDailyTarget();
+        var entries=batch==null ? List.<LearningBatchItem>of() : context.entries(batch.getId());
+        long unassigned=states.selectCountByQuery(excluding(due(userId,now),entries))
+            +states.selectCountByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries));
         return new TodayVO(now.toLocalDate(), target, states.selectCountByQuery(active(userId)),
             states.selectCountByQuery(due(userId, now)),
             states.selectCountByQuery(active(userId).and(column("first_learned_at").isNull())),
-            batch==null ? null : view(batch, context.entries(batch.getId())));
+            unassigned,batch!=null && "COMPLETED".equals(batch.getStatus()) && unassigned>0,
+            batch==null ? null : view(batch, entries));
     }
 
     @Transactional
@@ -69,16 +73,18 @@ public class DailyLearningService {
         long userId=currentUser.id(); context.lockUser(userId);
         var now=context.now(); var date=now.toLocalDate();
         var existing=todayBatch(userId, date, true);
-        if(existing!=null) { return view(existing, context.entries(existing.getId())); }
-        int target=settings.dailyTarget(userId);
-        var selected=new ArrayList<>(states.selectListByQuery(due(userId, now)
-            .orderBy(column("next_review_at").asc(), column("id").asc()).limit(target)));
-        int reviews=selected.size();
-        if(selected.size()<target) {
-            selected.addAll(states.selectListByQuery(active(userId).and(column("first_learned_at").isNull())
-                .orderBy(column("joined_at").asc(), column("id").asc()).limit(target-selected.size())));
+        if(existing!=null) {
+            var entries=context.entries(existing.getId());
+            if(!"COMPLETED".equals(existing.getStatus())) { return view(existing,entries); }
+            var selection=selectWords(userId,now,existing.getDailyTarget(),entries);
+            if(selection.words().isEmpty()) { return view(existing,entries); }
+            appendItems(existing,entries,selection);
+            updateBatch(existing,entries,now);
+            return view(existing,entries);
         }
-        if(selected.isEmpty()) { throw conflict("NO_DAILY_WORDS", "今日没有到期复习词或待学新词"); }
+        int target=settings.dailyTarget(userId);
+        var selection=selectWords(userId,now,target,List.of());
+        if(selection.words().isEmpty()) { throw conflict("NO_DAILY_WORDS", "今日没有到期复习词或待学新词"); }
         var batch=new LearningBatch(); batch.setUserId(userId); batch.setTaskType("DAILY");
         batch.setSelectionType("DAILY"); batch.setStatus("IN_PROGRESS"); batch.setLearningDate(date);
         batch.setDailyTarget(target); batch.setCreatedAt(now); batch.setUpdatedAt(now);
@@ -90,13 +96,37 @@ public class DailyLearningService {
             return view(existing, context.entries(existing.getId()));
         }
         var entries=new ArrayList<LearningBatchItem>();
-        for(int i=0;i<selected.size();i++) {
-            var item=new LearningBatchItem(); item.setBatchId(batch.getId()); item.setWordId(selected.get(i).getWordId());
-            item.setSortOrder(i+1); item.setQueueOrder((long)i+1); item.setItemType(i<reviews ? "REVIEW":"NEW");
-            item.setLearningStatus("PENDING"); item.setAnswerCount(0); item.setRelearnCount(0); item.setReinforcementRemaining(0); entries.add(item);
-        }
-        if(items.insertBatch(entries)!=entries.size()) { throw new IllegalStateException("Could not persist daily queue"); }
+        appendItems(batch,entries,selection);
         return view(batch, context.entries(batch.getId()));
+    }
+
+    private QueryWrapper excluding(QueryWrapper query,List<LearningBatchItem> entries) {
+        if(!entries.isEmpty()) { query.and(column("word_id").notIn(entries.stream().map(LearningBatchItem::getWordId).toList())); }
+        return query;
+    }
+    private record Selection(List<UserWordState> words,int reviews) {}
+    private Selection selectWords(long userId,LocalDateTime now,int limit,List<LearningBatchItem> entries) {
+        var selected=new ArrayList<>(states.selectListByQuery(excluding(due(userId,now),entries)
+            .orderBy(column("next_review_at").asc(),column("id").asc()).limit(limit)));
+        int reviews=selected.size();
+        if(reviews<limit) {
+            selected.addAll(states.selectListByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries)
+                .orderBy(column("joined_at").asc(),column("id").asc()).limit(limit-reviews)));
+        }
+        return new Selection(selected,reviews);
+    }
+    private void appendItems(LearningBatch batch,List<LearningBatchItem> entries,Selection selection) {
+        int sort=entries.stream().mapToInt(LearningBatchItem::getSortOrder).max().orElse(0);
+        long queue=entries.stream().mapToLong(LearningBatchItem::getQueueOrder).max().orElse(0);
+        var added=new ArrayList<LearningBatchItem>();
+        for(int i=0;i<selection.words().size();i++) {
+            var item=new LearningBatchItem(); item.setBatchId(batch.getId()); item.setWordId(selection.words().get(i).getWordId());
+            item.setSortOrder(sort+i+1); item.setQueueOrder(queue+i+1); item.setItemType(i<selection.reviews()?"REVIEW":"NEW");
+            item.setLearningStatus("PENDING"); item.setAnswerCount(0); item.setRelearnCount(0); item.setReinforcementRemaining(0);
+            added.add(item);
+        }
+        if(items.insertBatch(added)!=added.size()) { throw new IllegalStateException("Could not persist daily queue"); }
+        entries.addAll(context.entries(batch.getId()).stream().filter(i->i.getSortOrder()>sort).toList());
     }
 
     @Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
