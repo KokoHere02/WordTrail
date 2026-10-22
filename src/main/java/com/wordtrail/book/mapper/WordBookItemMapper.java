@@ -4,20 +4,31 @@ import com.mybatisflex.core.BaseMapper;
 import com.wordtrail.book.entity.WordBookItem;
 import com.wordtrail.book.vo.BookWordVO;
 import java.util.List;
+import java.time.LocalDateTime;
 import org.apache.ibatis.annotations.*;
 
 public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
-    record BookCount(Long bookId, long wordCount) {}
+    record BookProgress(Long bookId, long wordCount, long unlearnedCount, long startedCount, long dueCount) {}
 
     @Select("""
         <script>
-        SELECT book_id, COUNT(*) AS word_count FROM word_book_item
-        WHERE book_id IN
+        SELECT bi.book_id, COUNT(*) AS word_count,
+               COUNT(CASE WHEN s.first_learned_at IS NULL THEN 1 END) AS unlearned_count,
+               COUNT(CASE WHEN s.first_learned_at IS NOT NULL THEN 1 END) AS started_count,
+               COUNT(CASE WHEN s.plan_status='ACTIVE' AND s.first_learned_at IS NOT NULL
+                            AND s.next_review_at &lt;= #{now} THEN 1 END) AS due_count
+        FROM word_book_item bi
+        LEFT JOIN user_word_state s ON s.word_id=bi.word_id AND s.user_id=#{userId}
+        WHERE bi.book_id IN
         <foreach collection="bookIds" item="id" open="(" separator="," close=")">#{id}</foreach>
-        GROUP BY book_id
+        GROUP BY bi.book_id
         </script>
         """)
-    List<BookCount> countByBooks(@Param("bookIds") List<Long> bookIds);
+    List<BookProgress> progressByBooks(@Param("bookIds") List<Long> bookIds,
+            @Param("userId") long userId, @Param("now") LocalDateTime now);
+
+    @Select("SELECT COALESCE(MAX(sort_order),0) FROM word_book_item WHERE book_id=#{bookId}")
+    long maxSortOrder(@Param("bookId") long bookId);
 
     String WORDS_FROM = """
         FROM word_book_item bi

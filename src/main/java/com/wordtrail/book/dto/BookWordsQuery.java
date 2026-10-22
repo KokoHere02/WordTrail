@@ -12,7 +12,7 @@ public class BookWordsQuery {
     @NotNull @Min(value = 1, message = "size 必须在 1～100 之间")
     @Max(value = 100, message = "size 必须在 1～100 之间")
     private Integer size = 20;
-    private String keyword;
+    @Size(max = 255) private String keyword;
     @NotNull(message = "learningStatus 不能为空")
     private LearningStatus learningStatus = LearningStatus.ALL;
 }

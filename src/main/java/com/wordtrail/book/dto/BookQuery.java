@@ -12,5 +12,6 @@ public class BookQuery {
     @NotNull @Min(value = 1, message = "size 必须在 1～100 之间")
     @Max(value = 100, message = "size 必须在 1～100 之间")
     private Integer size = 20;
-    private String keyword;
+    @Size(max = 128) private String keyword;
+    @NotNull private BookScope scope = BookScope.ALL;
 }
