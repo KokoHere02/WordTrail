@@ -57,6 +57,7 @@ class LearningIntegrationTests {
             String statement = ((MappedStatement) invocation.getArgs()[0]).getId();
             if (invocation.getMethod().getName().equals("query")
                     && (statement.startsWith("com.wordtrail.book.mapper.")
+                        || statement.startsWith("com.wordtrail.word.mapper.")
                         || statement.startsWith("com.wordtrail.learning.mapper."))) {
                 reads.incrementAndGet();
             }
@@ -2524,6 +2525,334 @@ class LearningIntegrationTests {
         assertEquals(409,failed.statusCode()); assertEquals("REVIEW_HISTORY_INCOMPLETE",json.readTree(failed.body()).get("code").asText());
         assertEquals(queue,batchSnapshot(batch)); assertEquals(memory,stateSnapshot()); assertEquals(1,logCount(batch));
         assertEquals(latest.getId(),reviewLogs.selectOneById(latest.getId()).getId());
+    }
+
+    private long personalBook(String name, String description) throws Exception {
+        var response=call("POST","/api/word-books",Map.of("name",name,"description",description),tokenA);
+        assertEquals(201,response.statusCode(),response.body());
+        long id=json.readTree(response.body()).at("/data/id").asLong(); bookIds.add(id); return id;
+    }
+
+    private JsonNode personalBookWords(String method,long book,Long... ids) throws Exception {
+        var response=call(method,wordsPath(book),Map.of("wordIds",List.of(ids)),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return json.readTree(response.body()).get("data");
+    }
+
+    private String personalBookSnapshot(long book) throws Exception {
+        return json.writeValueAsString(bookItems.selectListByQuery(QueryWrapper.create().where(column("book_id").eq(book))
+            .orderBy(column("sort_order").asc(),column("id").asc())));
+    }
+
+    @Test void personalBooksCreateOwnedMetadataAndExposeSystemAndPersonalScopes() throws Exception {
+        long id=personalBook("  "+prefix+"_vocabulary  ","  我的词本  ");
+        var record=books.selectOneById(id); assertEquals(a,record.getOwnerId());
+        assertEquals(prefix+"_vocabulary",record.getName()); assertEquals("我的词本",record.getDescription());
+        var detail=get("/api/word-books/"+id,tokenA);
+        assertEquals("PERSONAL",detail.get("bookType").asText()); assertTrue(detail.get("editable").asBoolean());
+        for(String field:List.of("wordCount","unlearnedCount","startedCount","dueCount")) assertEquals(0,detail.get(field).asInt());
+        var personal=get("/api/word-books?keyword="+prefix+"&scope=PERSONAL",tokenA);
+        assertEquals(List.of(ownBook,emptyBook,id),ids(personal.get("records")));
+        assertEquals(List.of(systemBook),ids(get("/api/word-books?keyword="+prefix+"&scope=SYSTEM",tokenA).get("records")));
+        assertEquals(List.of(otherBook),ids(get("/api/word-books?keyword="+prefix+"&scope=PERSONAL",tokenB).get("records")));
+        var system=get("/api/word-books/"+systemBook,tokenA);
+        assertEquals("SYSTEM",system.get("bookType").asText()); assertFalse(system.get("editable").asBoolean());
+        assertEquals(404,call("GET","/api/word-books/"+id,null,tokenB).statusCode());
+    }
+
+    @Test void personalBooksUpdateCanClearDescriptionAndRepeatedMetadataDoesNotChangeTimestamps() throws Exception {
+        long id=personalBook(prefix+"_edit","description"); var original=books.selectOneById(id);
+        clock.advanceSeconds(10);
+        var response=call("PUT","/api/word-books/"+id,Map.of("name","  "+prefix+"_renamed  "),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); var edited=books.selectOneById(id);
+        assertEquals(prefix+"_renamed",edited.getName()); assertNull(edited.getDescription());
+        assertEquals(original.getOwnerId(),edited.getOwnerId()); assertEquals(original.getCreatedAt(),edited.getCreatedAt());
+        assertTrue(edited.getUpdatedAt().isAfter(original.getUpdatedAt()));
+        clock.advanceSeconds(10);
+        assertEquals(200,call("PUT","/api/word-books/"+id,Map.of("name",prefix+"_renamed","description","  "),tokenA).statusCode());
+        assertEquals(json.valueToTree(edited),json.valueToTree(books.selectOneById(id)));
+        assertEquals(200,call("PUT","/api/word-books/"+id,Map.of("name","n".repeat(128),"description","d".repeat(2000)),tokenA).statusCode());
+        assertEquals(2000,books.selectOneById(id).getDescription().length());
+    }
+
+    @Test void personalBooksValidateMetadataAndNeverAcceptClientOwnership() throws Exception {
+        long count=books.selectCountByQuery(QueryWrapper.create());
+        for(Object body:List.of(Map.of(),Map.of("name",""),Map.of("name"," \t\n "),Map.of("name","n".repeat(129)),
+                Map.of("name","valid","description","d".repeat(2001)),Map.of("name","valid","owner_id",b),
+                Map.of("name","valid","ownerId",b),Map.of("name","valid","user_id",b),Map.of("name","valid","id",otherBook),
+                json.readTree("{\"name\":null}"))) {
+            assertEquals(400,call("POST","/api/word-books",body,tokenA).statusCode(),body.toString());
+        }
+        assertEquals(count,books.selectCountByQuery(QueryWrapper.create()));
+        assertEquals(401,call("POST","/api/word-books",Map.of("name","valid"),null).statusCode());
+        assertEquals(401,call("PUT","/api/word-books/"+ownBook,Map.of("name","valid"),null).statusCode());
+        assertEquals(400,call("PUT","/api/word-books/0",Map.of("name","valid"),tokenA).statusCode());
+        for(String query:List.of("scope=USER","scope=personal","keyword="+"n".repeat(129))) {
+            assertEquals(400,call("GET","/api/word-books?"+query,null,tokenA).statusCode());
+        }
+    }
+
+    @Test void personalBooksSystemBooksAreReadOnlyAndOtherUsersAreIndistinguishableFromMissing() throws Exception {
+        var system=json.valueToTree(books.selectOneById(systemBook)); String associations=personalBookSnapshot(systemBook);
+        for(String method:List.of("POST","DELETE")) {
+            var body=Map.of("wordIds",List.of(wordIds.get(1)));
+            var rejected=call(method,wordsPath(systemBook),body,tokenA);
+            assertEquals(403,rejected.statusCode()); assertEquals("BOOK_READ_ONLY",json.readTree(rejected.body()).get("code").asText());
+            var forbidden=call(method,wordsPath(otherBook),body,tokenA);
+            var missing=call(method,wordsPath(Long.MAX_VALUE),body,tokenA);
+            assertEquals(404,forbidden.statusCode()); assertEquals(missing.body(),forbidden.body());
+        }
+        assertEquals(403,call("PUT","/api/word-books/"+systemBook,Map.of("name","changed"),tokenA).statusCode());
+        assertEquals(403,call("DELETE",wordsPath(systemBook)+"/"+wordIds.get(1),null,tokenA).statusCode());
+        var forbidden=call("PUT","/api/word-books/"+otherBook,Map.of("name","changed"),tokenA);
+        assertEquals(404,forbidden.statusCode());
+        assertEquals(forbidden.body(),call("PUT","/api/word-books/"+Long.MAX_VALUE,Map.of("name","changed"),tokenA).body());
+        assertEquals(system,json.valueToTree(books.selectOneById(systemBook))); assertEquals(associations,personalBookSnapshot(systemBook));
+        assertEquals(404,call("GET","/api/word-books/"+otherBook,null,tokenA).statusCode());
+    }
+
+    @Test void dictionarySearchUsesLiteralPrefixExactMatchingAndStableIdPagination() throws Exception {
+        String query="/api/words?keyword=";
+        var page=get(query+encoded(prefix+"ap"),tokenA); assertEquals(List.of(wordIds.get(0),wordIds.get(1)),ids(page.get("records")));
+        assertTrue(page.get("records").get(0).get("inBook").isNull());
+        for(int i=3;i<=6;i++) {
+            String literal=List.of("%","_","!","\\").get(i-3);
+            assertEquals(List.of(wordIds.get(i)),ids(get(query+encoded(prefix+literal),tokenA).get("records")));
+        }
+        assertEquals(0,get(query+encoded(prefix+"%' OR 1=1 --"),tokenA).get("total").asInt());
+        var missing=call("GET",query+encoded(prefix+"_not_in_dictionary"),null,tokenA);
+        assertEquals(200,missing.statusCode()); assertEquals("OK",json.readTree(missing.body()).get("code").asText());
+        assertTrue(json.readTree(missing.body()).get("message").asText().contains("词库中未找到"));
+        assertEquals(0,get(query+encoded(prefix+"app")+"&matchType=EXACT",tokenA).get("total").asInt());
+        long duplicate=word(prefix+"apple");
+        String exact=query+encoded(prefix+"apple")+"&matchType=EXACT&size=1";
+        assertEquals(List.of(wordIds.get(0)),ids(get(exact,tokenA).get("records")));
+        assertEquals(List.of(duplicate),ids(get(exact+"&page=2",tokenA).get("records")));
+        assertEquals(2,get(exact,tokenA).get("total").asInt());
+        assertEquals(0,get(exact+"&page=2147483647",tokenA).get("records").size());
+        long upper=word(prefix+"Apple");
+        assertEquals(List.of(upper),ids(get(query+encoded(prefix+"App"),tokenA).get("records")));
+    }
+
+    @Test void dictionarySearchValidatesParametersAndChecksTargetBookAccess() throws Exception {
+        assertEquals(401,call("GET","/api/words?keyword=app",null,null).statusCode());
+        for(String query:List.of("","keyword=","keyword="+encoded("  "),"keyword="+"a".repeat(256),
+                "keyword=app&page=0","keyword=app&size=101","keyword=app&size=0","keyword=app&bookId=0",
+                "keyword=app&bookId=text","keyword=app&matchType=ANY")) {
+            assertEquals(400,call("GET","/api/words?"+query,null,tokenA).statusCode(),query);
+        }
+        String query="/api/words?keyword="+prefix+"&bookId=";
+        var missing=call("GET",query+Long.MAX_VALUE,null,tokenA);
+        var forbidden=call("GET",query+otherBook,null,tokenA);
+        assertEquals(404,forbidden.statusCode()); assertEquals(missing.body(),forbidden.body());
+        assertEquals(200,call("GET",query+systemBook,null,tokenA).statusCode());
+    }
+
+    @Test void dictionarySearchShowsTargetMembershipWithoutPerWordQueriesOrLearningWrites() throws Exception {
+        String query="/api/words?keyword="+encoded(prefix+"ap")+"&bookId="+emptyBook;
+        var empty=get(query,tokenA); assertFalse(empty.get("records").get(1).get("inBook").asBoolean());
+        personalBookWords("POST",emptyBook,wordIds.get(1));
+        var collected=get(query,tokenA); assertFalse(collected.get("records").get(0).get("inBook").asBoolean());
+        assertTrue(collected.get("records").get(1).get("inBook").asBoolean());
+        int writes=probe.writes.get(); probe.reads.set(0);
+        get("/api/words?keyword="+prefix+"&size=1",tokenA); int one=probe.reads.get();
+        probe.reads.set(0); get("/api/words?keyword="+prefix+"&size=100",tokenA);
+        assertEquals(2,one); assertEquals(one,probe.reads.get()); assertEquals(writes,probe.writes.get());
+        personalBookWords("DELETE",emptyBook,wordIds.get(1));
+        assertFalse(get(query,tokenA).get("records").get(1).get("inBook").asBoolean());
+    }
+
+    @Test void personalBooksCollectIdempotentlyPreserveOrderAndDoNotAutomaticallyJoinLearningPlans() throws Exception {
+        var original=bookItems.selectOneByQuery(QueryWrapper.create().where(column("book_id").eq(ownBook)));
+        String memory=stateSnapshot(); long batchCount=countBatches();
+        var first=personalBookWords("POST",ownBook,wordIds.get(1),wordIds.get(2),wordIds.get(0),wordIds.get(1));
+        assertEquals(3,first.get("requestedCount").asInt()); assertEquals(2,first.get("changedCount").asInt());
+        assertEquals(1,first.get("unchangedCount").asInt());
+        assertEquals(List.of(wordIds.get(2),wordIds.get(1),wordIds.get(0)),ids(get(wordsPath(ownBook),tokenA).get("records")));
+        assertEquals(json.valueToTree(original),json.valueToTree(bookItems.selectOneById(original.getId())));
+        String before=personalBookSnapshot(ownBook); var metadata=json.valueToTree(books.selectOneById(ownBook)); clock.advanceSeconds(10);
+        var retry=personalBookWords("POST",ownBook,wordIds.get(0),wordIds.get(1));
+        assertEquals(0,retry.get("changedCount").asInt()); assertEquals(2,retry.get("unchangedCount").asInt());
+        assertEquals(before,personalBookSnapshot(ownBook)); assertEquals(metadata,json.valueToTree(books.selectOneById(ownBook)));
+        assertEquals(memory,stateSnapshot()); assertEquals(batchCount,countBatches());
+        assertEquals(3,get("/api/word-books/"+ownBook,tokenA).get("wordCount").asInt());
+    }
+
+    @Test void personalBooksInvalidWordsRejectWholeAddsAndRemovalsAndAbsentMembershipIsIdempotent() throws Exception {
+        String before=personalBookSnapshot(ownBook); var metadata=json.valueToTree(books.selectOneById(ownBook));
+        for(String method:List.of("POST","DELETE")) {
+            var failed=call(method,wordsPath(ownBook),Map.of("wordIds",List.of(wordIds.get(2),Long.MAX_VALUE)),tokenA);
+            assertEquals(404,failed.statusCode()); assertEquals("WORD_NOT_FOUND",json.readTree(failed.body()).get("code").asText());
+            assertEquals(before,personalBookSnapshot(ownBook)); assertEquals(metadata,json.valueToTree(books.selectOneById(ownBook)));
+        }
+        assertEquals(0,personalBookWords("DELETE",ownBook,wordIds.get(1)).get("changedCount").asInt());
+        assertEquals(metadata,json.valueToTree(books.selectOneById(ownBook)));
+        assertEquals(1,personalBookWords("DELETE",ownBook,wordIds.get(2),wordIds.get(2)).get("changedCount").asInt());
+        var repeated=call("DELETE",wordsPath(ownBook)+"/"+wordIds.get(2),null,tokenA);
+        assertEquals(200,repeated.statusCode()); assertEquals(0,json.readTree(repeated.body()).at("/data/changedCount").asInt());
+        assertEquals(0,get("/api/word-books/"+ownBook,tokenA).get("wordCount").asInt());
+        assertNotNull(words.selectOneById(wordIds.get(2)));
+    }
+
+    @Test void personalBooksBatchValidationSupports100DistinctWordsAndRejectsSpoofedIdentity() throws Exception {
+        var extras=new ArrayList<Long>();
+        for(int i=0;i<100;i++) extras.add(word(prefix+"_collection_"+i));
+        var repeated=new ArrayList<>(extras); repeated.addAll(extras);
+        var added=personalBookWords("POST",emptyBook,repeated.toArray(Long[]::new));
+        assertEquals(100,added.get("requestedCount").asInt()); assertEquals(100,added.get("changedCount").asInt());
+        var tooMany=new ArrayList<>(extras); tooMany.add(wordIds.get(7));
+        for(String method:List.of("POST","DELETE")) {
+            for(Object body:List.of(Map.of(),Map.of("wordIds",List.of()),Map.of("wordIds",List.of(0)),
+                    Map.of("wordIds",tooMany),Map.of("wordIds",List.of(wordIds.get(1)),"user_id",b),
+                    json.readTree("{\"wordIds\":[null]}"),json.readTree("{\"wordIds\":[1.5]}"))) {
+                assertEquals(400,call(method,wordsPath(emptyBook),body,tokenA).statusCode(),body.toString());
+            }
+            assertEquals(401,call(method,wordsPath(emptyBook),Map.of("wordIds",extras),null).statusCode());
+        }
+        assertEquals(100,get("/api/word-books/"+emptyBook,tokenA).get("wordCount").asInt());
+        assertEquals(100,personalBookWords("DELETE",emptyBook,extras.toArray(Long[]::new)).get("changedCount").asInt());
+    }
+
+    @Test void personalBooksRemovalKeepsWordsPlansDailyQueuePracticeAndEventHistory() throws Exception {
+        long word=word(prefix+"_only_personal"); personalBookWords("POST",emptyBook,word);
+        var joined=call("POST","/api/learning-plan/words",Map.of("bookId",emptyBook,"wordIds",List.of(word)),tokenA);
+        assertEquals(200,joined.statusCode()); long daily=startDay().get("batchId").asLong(); long item=itemId(daily);
+        String queue=batchSnapshot(daily),memory=stateSnapshot();
+        assertEquals(1,personalBookWords("DELETE",emptyBook,word).get("changedCount").asInt());
+        assertEquals(queue,batchSnapshot(daily)); assertEquals(memory,stateSnapshot()); assertNotNull(words.selectOneById(word));
+        personalBookWords("POST",emptyBook,word);
+        dailyAnswer(daily,item,1,1);
+        long practice=created(Map.of("bookId",emptyBook,"selectionType","MANUAL","wordIds",List.of(word))).get("batchId").asLong();
+        answer(practice,itemId(practice),3);
+        long unfinished=created(Map.of("bookId",emptyBook,"selectionType","MANUAL","wordIds",List.of(word))).get("batchId").asLong();
+        String unfinishedBefore=batchSnapshot(unfinished);
+        queue=batchSnapshot(daily); memory=stateSnapshot(); String practiceBefore=batchSnapshot(practice);
+        var history=get("/api/learning-plan/words/"+word+"/history",tokenA);
+        personalBookWords("DELETE",emptyBook,word);
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(daily)); assertEquals(practiceBefore,batchSnapshot(practice));
+        assertEquals(history,get("/api/learning-plan/words/"+word+"/history",tokenA));
+        assertEquals(2,history.get("total").asInt());
+        assertEquals(unfinishedBefore,batchSnapshot(unfinished));
+        answer(unfinished,itemId(unfinished),1);
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(daily));
+        assertEquals(3,get("/api/learning-plan/words/"+word+"/history",tokenA).get("total").asInt());
+        assertEquals("ACTIVE",state(a,word).getPlanStatus()); assertEquals(1,statisticsDaily(statisticsDate()).get("completedCount").asInt());
+        assertEquals(0,get("/api/word-books/"+emptyBook,tokenA).get("wordCount").asInt());
+    }
+
+    @Test void personalBooksReuseTheExistingJoinPlanEndpointAndShareMemoryAcrossBooks() throws Exception {
+        long first=personalBook(prefix+"_first",""),second=personalBook(prefix+"_second",""); long word=wordIds.get(1);
+        personalBookWords("POST",first,word); personalBookWords("POST",second,word);
+        var joined=call("POST","/api/learning-plan/words",Map.of("bookId",first,"wordIds",List.of(word,word)),tokenA);
+        assertEquals(200,joined.statusCode()); assertEquals(1,json.readTree(joined.body()).at("/data/addedCount").asInt());
+        assertEquals(0,get("/api/word-books/"+first,tokenA).get("startedCount").asInt());
+        long daily=startDay().get("batchId").asLong(); dailyAnswer(daily,itemId(daily),1,1); String memory=stateSnapshot();
+        var again=call("POST","/api/learning-plan/words",Map.of("bookId",second,"wordIds",List.of(word)),tokenA);
+        assertEquals(200,again.statusCode()); assertEquals(1,json.readTree(again.body()).at("/data/unchangedCount").asInt());
+        assertEquals(memory,stateSnapshot());
+        assertEquals(1,get("/api/word-books/"+first,tokenA).get("startedCount").asInt());
+        assertEquals(1,get("/api/word-books/"+second,tokenA).get("startedCount").asInt());
+        assertEquals(1,states.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(a)).and(column("word_id").eq(word))));
+        personalBookWords("DELETE",first,word);
+        assertEquals(400,call("POST","/api/learning-plan/words",Map.of("bookId",first,"wordIds",List.of(word)),tokenA).statusCode());
+        assertEquals(404,call("POST","/api/learning-plan/words",Map.of("bookId",second,"wordIds",List.of(word)),tokenB).statusCode());
+        assertEquals(memory,stateSnapshot());
+    }
+
+    @Test void personalBooksProgressSeparatesUnstartedStartedAndActiveDueUsingShanghaiTime() throws Exception {
+        clock.at(Instant.parse("2026-10-20T16:00:00Z")); tokenA=jwt.issue(a); tokenB=jwt.issue(b);
+        personalBookWords("POST",emptyBook,wordIds.subList(0,7).toArray(Long[]::new)); joinPlan(wordIds.subList(1,7).toArray(Long[]::new));
+        var now=LocalDateTime.of(2026,10,21,0,0);
+        for(int i=2;i<=5;i++) {
+            var state=state(a,wordIds.get(i)); state.setFirstLearnedAt(now.minusDays(10));
+            state.setNextReviewAt(i==2?now.plusSeconds(1):now.minusDays(1));
+            state.setPlanStatus(i==3?"PAUSED":i==4?"REMOVED":"ACTIVE"); states.update(state);
+        }
+        var original=state(a,wordIds.get(0)); original.setNextReviewAt(now.plusDays(5)); states.update(original);
+        var due=state(a,wordIds.get(5)); due.setNextReviewAt(now); states.update(due);
+        var progress=get("/api/word-books/"+emptyBook,tokenA);
+        assertEquals(7,progress.get("wordCount").asInt()); assertEquals(2,progress.get("unlearnedCount").asInt());
+        assertEquals(5,progress.get("startedCount").asInt()); assertEquals(1,progress.get("dueCount").asInt());
+        var other=get("/api/word-books/"+systemBook,tokenB); assertEquals(1,other.get("startedCount").asInt()); assertEquals(0,other.get("dueCount").asInt());
+        clock.advanceSeconds(1); assertEquals(2,get("/api/word-books/"+emptyBook,tokenA).get("dueCount").asInt());
+        planManagementStatus("PAUSED",wordIds.get(5));
+        assertEquals(1,get("/api/word-books/"+emptyBook,tokenA).get("dueCount").asInt());
+        assertEquals(5,get("/api/word-books/"+emptyBook,tokenA).get("startedCount").asInt());
+    }
+
+    @Test void personalBooksPracticeOnlyDoesNotTurnAnUnlearnedWordIntoStarted() throws Exception {
+        personalBookWords("POST",emptyBook,wordIds.get(1)); long practice=manualBatch(wordIds.get(1)); answer(practice,itemId(practice),1);
+        var progress=get("/api/word-books/"+emptyBook,tokenA);
+        assertEquals(1,progress.get("unlearnedCount").asInt()); assertEquals(0,progress.get("startedCount").asInt());
+        assertEquals(0,progress.get("dueCount").asInt());
+        assertFalse(get(wordsPath(emptyBook),tokenA).get("records").get(0).get("learned").asBoolean());
+    }
+
+    @Test void personalBooksProgressIsGroupedAndQueriesDoNotGrowWithBookCount() throws Exception {
+        for(int i=0;i<5;i++) { long id=personalBook(prefix+"_progress_"+i,""); personalBookWords("POST",id,wordIds.get(0),wordIds.get(1)); }
+        int writes=probe.writes.get(); probe.reads.set(0); get("/api/word-books?keyword="+prefix+"&size=1",tokenA);
+        int one=probe.reads.get(); probe.reads.set(0); var many=get("/api/word-books?keyword="+prefix+"&size=100",tokenA);
+        assertEquals(one,probe.reads.get()); assertTrue(one<=3); assertEquals(writes,probe.writes.get());
+        for(var book:many.get("records")) {
+            assertEquals(book.get("wordCount").asInt(),book.get("unlearnedCount").asInt()+book.get("startedCount").asInt());
+            assertTrue(book.get("dueCount").asInt()<=book.get("startedCount").asInt());
+        }
+    }
+
+    @Test void personalBooksConcurrentDuplicateCollectionsKeepOneAssociationAndStableOrders() throws Exception {
+        var body=Map.of("wordIds",List.of(wordIds.get(1),wordIds.get(3))); var gate=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var one=pool.submit(()->{gate.await();return call("POST",wordsPath(emptyBook),body,tokenA);});
+            var two=pool.submit(()->{gate.await();return call("POST",wordsPath(emptyBook),body,tokenA);});
+            gate.countDown(); var first=one.get(15,TimeUnit.SECONDS); var second=two.get(15,TimeUnit.SECONDS);
+            assertEquals(200,first.statusCode(),first.body()); assertEquals(200,second.statusCode(),second.body());
+            assertEquals(2,json.readTree(first.body()).at("/data/changedCount").asInt()+json.readTree(second.body()).at("/data/changedCount").asInt());
+        }
+        assertEquals(List.of(wordIds.get(1),wordIds.get(3)),ids(get(wordsPath(emptyBook),tokenA).get("records")));
+        var entries=bookItems.selectListByQuery(QueryWrapper.create().where(column("book_id").eq(emptyBook)).orderBy(column("sort_order").asc()));
+        assertEquals(List.of(1,2),entries.stream().map(WordBookItem::getSortOrder).toList());
+        var duplicate=entries.getFirst(); duplicate.setId(null);
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->bookItems.insertSelective(duplicate));
+    }
+
+    @Test void personalBooksRemovalAndJoiningPlansSerializeWithoutPartialLearningState() throws Exception {
+        long word=wordIds.get(7); personalBookWords("POST",emptyBook,word); var gate=new CountDownLatch(1); int joinStatus;
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var remove=pool.submit(()->{gate.await();return call("DELETE",wordsPath(emptyBook),Map.of("wordIds",List.of(word)),tokenA);});
+            var join=pool.submit(()->{gate.await();return call("POST","/api/learning-plan/words",Map.of("bookId",emptyBook,"wordIds",List.of(word)),tokenA);});
+            gate.countDown(); assertEquals(200,remove.get(15,TimeUnit.SECONDS).statusCode()); joinStatus=join.get(15,TimeUnit.SECONDS).statusCode();
+        }
+        assertTrue(Set.of(200,400).contains(joinStatus));
+        assertEquals(joinStatus==200?1:0,states.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(a)).and(column("word_id").eq(word))));
+        assertEquals(0,get("/api/word-books/"+emptyBook,tokenA).get("wordCount").asInt()); assertNotNull(words.selectOneById(word));
+    }
+
+    @Test void personalBooksMutationFailuresRollBackMetadataAssociationsAndTimestamps() throws Exception {
+        String associations=personalBookSnapshot(ownBook),memory=stateSnapshot(); var metadata=json.valueToTree(books.selectOneById(ownBook));
+        long count=books.selectCountByQuery(QueryWrapper.create());
+        probe.failAfterMapper="com.wordtrail.book.mapper.WordBookMapper";
+        try {
+            assertEquals(500,call("POST","/api/word-books",Map.of("name",prefix+"_failed"),tokenA).statusCode());
+            assertEquals(500,call("PUT","/api/word-books/"+ownBook,Map.of("name","failed"),tokenA).statusCode());
+        } finally { probe.failAfterMapper=null; }
+        assertEquals(count,books.selectCountByQuery(QueryWrapper.create()));
+        for(String mapper:List.of("WordBookItemMapper","WordBookMapper")) {
+            for(String method:List.of("POST","DELETE")) {
+                probe.failAfterMapper="com.wordtrail.book.mapper."+mapper;
+                var selected="POST".equals(method)?List.of(wordIds.get(1),wordIds.get(3)):List.of(wordIds.get(2));
+                try { assertEquals(500,call(method,wordsPath(ownBook),Map.of("wordIds",selected),tokenA).statusCode()); }
+                finally { probe.failAfterMapper=null; }
+                assertEquals(associations,personalBookSnapshot(ownBook)); assertEquals(metadata,json.valueToTree(books.selectOneById(ownBook)));
+                assertEquals(memory,stateSnapshot());
+            }
+        }
+    }
+
+    @Test void personalBooksOrderOverflowRejectsCollectionWithoutChangingExistingMembership() throws Exception {
+        var old=bookItems.selectOneByQuery(QueryWrapper.create().where(column("book_id").eq(ownBook)));
+        old.setSortOrder(Integer.MAX_VALUE); bookItems.update(old); String snapshot=personalBookSnapshot(ownBook);
+        var response=call("POST",wordsPath(ownBook),Map.of("wordIds",List.of(wordIds.get(1))),tokenA);
+        assertEquals(409,response.statusCode()); assertEquals("BOOK_ORDER_LIMIT",json.readTree(response.body()).get("code").asText());
+        assertEquals(snapshot,personalBookSnapshot(ownBook));
     }
 
     private void rollbackAfterWrite(String mapper) throws Exception {
