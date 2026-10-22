@@ -4,8 +4,7 @@ import com.mybatisflex.core.query.QueryWrapper;
 import com.wordtrail.common.exception.BusinessException;
 import com.wordtrail.learning.entity.*;
 import com.wordtrail.learning.mapper.*;
-import com.wordtrail.user.mapper.UserMapper;
-import com.wordtrail.security.JwtTokenService;
+import com.wordtrail.security.UserWriteLock;
 import java.time.*;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
@@ -18,7 +17,7 @@ import static com.mybatisflex.core.query.QueryMethods.column;
 public class LearningContext {
     public static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
     private final Clock clock;
-    private final UserMapper users;
+    private final UserWriteLock userWriteLock;
     private final LearningBatchMapper batches;
     private final LearningBatchItemMapper items;
 
@@ -27,8 +26,7 @@ public class LearningContext {
 
     // All learning mutations take the user lock first, including plan edits and practice.
     public void lockUser(long userId) {
-        if (users.selectOneByQuery(QueryWrapper.create().select(column("id"))
-                .where(column("id").eq(userId)).forUpdate()) == null) { throw JwtTokenService.unauthorized(); }
+        userWriteLock.lock(userId);
     }
 
     public LearningBatch ownedBatch(long userId, long batchId, boolean lock) {
