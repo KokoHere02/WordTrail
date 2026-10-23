@@ -345,7 +345,7 @@ class LearningIntegrationTests {
         assertTrue(records.get(0).get("lastResult").isNull());
         assertTrue(records.get(2).get("learned").asBoolean());
         assertEquals(3, records.get(2).get("lastResult").asInt());
-        assertEquals(6, records.get(0).size());
+        assertEquals(7, records.get(0).size());
         var secondPage = get(wordsPath(systemBook) + "?page=2&size=2", tokenA);
         assertEquals(7, secondPage.get("total").asLong());
         assertEquals(List.of(wordIds.get(0), wordIds.get(3)), ids(secondPage.get("records")));
@@ -1092,7 +1092,7 @@ class LearningIntegrationTests {
         assertEquals(5, all.get("total").asLong());
         for (int i = 0; i < entries.size(); i++) {
             var row = all.get("records").get(i);
-            assertEquals(9, row.size());
+            assertEquals(10, row.size());
             assertEquals(1, row.get("answerCount").asInt());
             assertTrue(row.get("statisticsComplete").asBoolean());
             assertEquals(entries.get(i).getId(), row.get("itemId").asLong());
@@ -3287,6 +3287,74 @@ class LearningIntegrationTests {
         }
         assertEquals(writes,probe.writes.get()); assertEquals(state,stateSnapshot()); assertEquals(queue,batchSnapshot(daily));
         assertEquals(exercise,batchSnapshot(practice)); assertEquals(logs,logCount(daily)+logCount(practice));
+    }
+
+    private static final String GROUPED_TRANSLATION="n. 记录；记载\\nvt. 记录；录制\\n[计] 日志";
+    private void dictionaryTranslation(long wordId,String translation) {
+        var word=words.selectOneById(wordId); word.setTranslation(translation);
+        assertEquals(1,words.updateByQuery(word,false,QueryWrapper.create().where(column("id").eq(wordId))));
+    }
+    private void assertTranslationGroups(JsonNode value) throws Exception {
+        assertEquals(GROUPED_TRANSLATION,value.get("translation").asText());
+        assertEquals(json.readTree("[{\"partOfSpeech\":\"n.\",\"meaning\":\"记录；记载\"},{\"partOfSpeech\":\"vt.\",\"meaning\":\"记录；录制\"},{\"partOfSpeech\":null,\"meaning\":\"[计] 日志\"}]"),
+            value.get("translationGroups"));
+    }
+
+    @Test void translationGroupsAreSharedByDictionaryBooksPlansAndWordDetailWithoutChangingStoredText() throws Exception {
+        long word=wordIds.get(1); dictionaryTranslation(word,GROUPED_TRANSLATION);
+        personalBookWords("POST",emptyBook,word); joinPlan(word);
+        int writes=probe.writes.get();
+        assertTranslationGroups(get("/api/words/"+word,tokenA));
+        assertTranslationGroups(get("/api/words?keyword="+encoded(words.selectOneById(word).getWord())+"&matchType=EXACT",tokenA).get("records").get(0));
+        assertTranslationGroups(get(wordsPath(emptyBook),tokenA).get("records").get(0));
+        assertTranslationGroups(get("/api/learning-plan/words?keyword="+encoded(words.selectOneById(word).getWord()),tokenA).get("records").get(0));
+        assertEquals(GROUPED_TRANSLATION,words.selectOneById(word).getTranslation()); assertEquals(writes,probe.writes.get());
+    }
+
+    @Test void translationGroupsDoNotLeakFromDailyPendingReinforcementOrCorrectedItems() throws Exception {
+        long word=wordIds.get(1); dictionaryTranslation(word,GROUPED_TRANSLATION); joinPlan(word);
+        long batch=startDay().get("batchId").asLong(); long item=itemId(batch);
+        var pending=get(dailyItem(batch,item),tokenA);
+        assertFalse(pending.has("translation")); assertFalse(pending.has("translationGroups"));
+        assertTranslationGroups(dailyAnswer(batch,item,2,1));
+        var reinforcement=get(dailyItem(batch,item),tokenA);
+        assertFalse(reinforcement.has("translation")); assertFalse(reinforcement.has("translationGroups"));
+        assertTranslationGroups(dailyAnswer(batch,item,1,2)); var done=dailyAnswer(batch,item,1,3);
+        assertTranslationGroups(done); assertTranslationGroups(get(dailyItem(batch,item),tokenA));
+        String key=requestId(); assertTranslationGroups(correction(batch,item,done.get("logId").asLong(),2,key));
+        assertTranslationGroups(correction(batch,item,done.get("logId").asLong(),2,key));
+        var hiddenAgain=get(dailyItem(batch,item),tokenA);
+        assertFalse(hiddenAgain.has("translation")); assertFalse(hiddenAgain.has("translationGroups"));
+        assertTranslationGroups(get("/api/learning/statistics/words",tokenA).get("records").get(0));
+        assertTranslationGroups(weakWords("DAILY").get("records").get(0));
+    }
+
+    @Test void translationGroupsAppearInPracticeAnswersCorrectionsResultsAndWeakWords() throws Exception {
+        long word=wordIds.get(1); dictionaryTranslation(word,GROUPED_TRANSLATION);
+        long batch=manualBatch(word); long item=itemId(batch); String memory=stateSnapshot();
+        var pending=get(itemPath(batch,item),tokenA);
+        assertFalse(pending.has("translation")); assertFalse(pending.has("translationGroups"));
+        var body=Map.of("result",3,"requestId",requestId());
+        for(int i=0;i<2;i++) {
+            var response=call("PUT",itemPath(batch,item)+"/answer",body,tokenA);
+            assertEquals(200,response.statusCode()); assertTranslationGroups(json.readTree(response.body()).get("data"));
+        }
+        assertTranslationGroups(get(itemPath(batch,item),tokenA));
+        assertTranslationGroups(answer(batch,item,2));
+        assertTranslationGroups(get(batchPath(batch)+"/result/words",tokenA).get("records").get(0));
+        assertTranslationGroups(weakWords("PRACTICE").get("records").get(0));
+        assertEquals(memory,stateSnapshot()); assertEquals(GROUPED_TRANSLATION,words.selectOneById(word).getTranslation());
+    }
+
+    @Test void translationGroupsFallbackAndEmptyValuesRemainCompatibleWithOriginalTranslation() throws Exception {
+        long word=wordIds.get(1);
+        for(String text:new String[]{null,"","  ","xyz. 未知标识","[医] 补充说明"}) {
+            dictionaryTranslation(word,text); var detail=get("/api/words/"+word,tokenA);
+            assertEquals(json.valueToTree(text),detail.get("translation"));
+            var groups=detail.get("translationGroups"); assertTrue(groups.isArray());
+            if(text==null || text.isBlank()) assertEquals(0,groups.size());
+            else { assertEquals(text,groups.get(0).get("meaning").asText()); assertTrue(groups.get(0).get("partOfSpeech").isNull()); }
+        }
     }
 
     private void rollbackAfterWrite(String mapper) throws Exception {
