@@ -34,6 +34,7 @@ public class LearningService {
     private final WordMapper words;
     private final LearningContext context;
     private final ReviewEvents events;
+    private final ReviewEvidenceMapper evidence;
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public PageVO<BatchListVO> list(BatchQuery request) {
@@ -69,8 +70,11 @@ public class LearningService {
             throw conflict("BATCH_RESULT_INCONSISTENT", "本轮结果不完整，无法汇总");
         }
         var book = batch.getBookId() == null ? null : wordBooks.selectOneById(batch.getBookId());
+        var coverage = evidence.coverage(currentUser.id(), "PRACTICE", batchId);
         return new BatchResultVO(batch.getId(), batch.getBookId(), book == null ? null : book.getName(),
-            entries.size(), known, uncertain, unknown, uncertain + unknown, batch.getCompletedAt());
+            entries.size(), known, uncertain, unknown, uncertain + unknown, batch.getCompletedAt(),
+            known + uncertain + unknown, coverage.answerCount(), uncertain + unknown,
+            coverage.incompleteWordCount()==0, coverage.incompleteWordCount(), "RECORDED_EVENTS_AND_ITEMS");
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
@@ -82,7 +86,7 @@ public class LearningService {
         long total = details.selectCountByQuery(query);
         long offset = ((long) request.getPage() - 1) * request.getSize();
         var records = offset >= total ? List.<ResultWordVO>of()
-            : details.resultWords(batchId, request.getResult(), offset, request.getSize());
+            : evidence.resultWords(currentUser.id(), "PRACTICE", batchId, request.getResult(), offset, request.getSize());
         return new PageVO<>(request.getPage(), request.getSize(), total, records);
     }
 
@@ -93,10 +97,7 @@ public class LearningService {
         lockUser(userId);
         var source = ownedBatch(batchId, userId, true);
         requireCompleted(source);
-        if (source.getBookId() == null) {
-            throw new BusinessException(HttpStatus.NOT_FOUND, "BOOK_NOT_FOUND", "来源词书不存在或无权访问");
-        }
-        books.requireAccessible(source.getBookId(), userId);
+        if (source.getBookId() != null) { books.requireAccessible(source.getBookId(), userId); }
         var selected = entries(batchId).stream()
             .filter(item -> Objects.equals(item.getResult(), 2) || Objects.equals(item.getResult(), 3))
             .map(LearningBatchItem::getWordId).toList();
@@ -282,8 +283,22 @@ public class LearningService {
         return createBatch(userId, request.getBookId(), request.getSelectionType().name(), selected);
     }
 
-    // Called only inside create/relearn transactions; the original batch and states are never written here.
-    private BatchVO createBatch(long userId, long bookId, String selectionType, List<Long> selected) {
+    @Transactional
+    public BatchVO createWeakPractice(WeakPracticeRequest request) {
+        long userId = currentUser.id(); lockUser(userId);
+        var selected = new ArrayList<>(new LinkedHashSet<>(request.wordIds()));
+        if (selected.isEmpty() || selected.size()>100) { throw invalid("每次只能选择 1～100 个不同单词"); }
+        if (words.selectCountByQuery(QueryWrapper.create().where(column("id").in(selected))) != selected.size()) {
+            throw new BusinessException(HttpStatus.NOT_FOUND, "WORD_NOT_FOUND", "部分单词不存在，未创建专项练习");
+        }
+        if (evidence.weakSelection(userId, request.source().name(), null, selected).size()!=selected.size()) {
+            throw conflict("WEAK_WORD_SELECTION_CHANGED", "所选单词不再全部属于该来源的薄弱词，请刷新列表后重试");
+        }
+        return createBatch(userId, null, SelectionType.MANUAL.name(), selected);
+    }
+
+    // Source events establish ownership for cross-book practice; no plan or source item is changed.
+    private BatchVO createBatch(long userId, Long bookId, String selectionType, List<Long> selected) {
         var batch = new LearningBatch();
         batch.setUserId(userId);
         batch.setBookId(bookId);

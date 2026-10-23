@@ -1010,7 +1010,11 @@ class LearningIntegrationTests {
         long source = completedBatch(1, 2, 3, 2);
         var entries = batchDetails(source);
         var summary = get(batchPath(source) + "/result", tokenA);
-        assertEquals(9, summary.size());
+        assertEquals(15, summary.size());
+        assertEquals(4, summary.get("answerCount").asInt());
+        assertEquals(4, summary.get("completedCount").asInt());
+        assertEquals(3, summary.get("unfamiliarCount").asInt());
+        assertTrue(summary.get("statisticsComplete").asBoolean());
         assertEquals(source, summary.get("batchId").asLong());
         assertEquals(systemBook, summary.get("bookId").asLong());
         assertEquals(prefix + "_system", summary.get("bookName").asText());
@@ -1080,7 +1084,9 @@ class LearningIntegrationTests {
         assertEquals(5, all.get("total").asLong());
         for (int i = 0; i < entries.size(); i++) {
             var row = all.get("records").get(i);
-            assertEquals(7, row.size());
+            assertEquals(9, row.size());
+            assertEquals(1, row.get("answerCount").asInt());
+            assertTrue(row.get("statisticsComplete").asBoolean());
             assertEquals(entries.get(i).getId(), row.get("itemId").asLong());
             assertEquals(entries.get(i).getWordId(), row.get("wordId").asLong());
             assertEquals(words.selectOneById(entries.get(i).getWordId()).getWord(), row.get("word").asText());
@@ -1198,7 +1204,7 @@ class LearningIntegrationTests {
         assertEquals(before, countBatches());
     }
 
-    @Test void relearnRechecksSourceBookAccessAndHandlesMissingBook() throws Exception {
+    @Test void relearnRechecksSourceBookAccessAndReportsEmptyCrossBookSource() throws Exception {
         long source = completedBatch(2);
         long before = countBatches();
         var patch = new WordBook(); patch.setId(systemBook); patch.setOwnerId(b); books.update(patch);
@@ -1211,8 +1217,8 @@ class LearningIntegrationTests {
         detached.setStatus("COMPLETED"); detached.setCompletedAt(LocalDateTime.now());
         batches.insertSelective(detached);
         var missing = call("POST", batchPath(detached.getId()) + "/relearn", null, tokenA);
-        assertEquals(404, missing.statusCode());
-        assertEquals("BOOK_NOT_FOUND", json.readTree(missing.body()).get("code").asText());
+        assertEquals(409, missing.statusCode());
+        assertEquals("NO_RELEARN_WORDS", json.readTree(missing.body()).get("code").asText());
         assertEquals(before + 1, countBatches());
     }
 
@@ -2853,6 +2859,217 @@ class LearningIntegrationTests {
         var response=call("POST",wordsPath(ownBook),Map.of("wordIds",List.of(wordIds.get(1))),tokenA);
         assertEquals(409,response.statusCode()); assertEquals("BOOK_ORDER_LIMIT",json.readTree(response.body()).get("code").asText());
         assertEquals(snapshot,personalBookSnapshot(ownBook));
+    }
+
+    private JsonNode weakWords(String source) throws Exception {
+        return get("/api/learning/weak-words?source="+source,tokenA);
+    }
+    private HttpResponse<String> weakPractice(String source, Long... ids) throws Exception {
+        return call("POST","/api/learning/weak-words/practice",Map.of("source",source,"wordIds",List.of(ids)),tokenA);
+    }
+
+    @Test void wordDetailsShowOnlyOwnPersonalBooksAndCurrentPlanWithoutInventingHistory() throws Exception {
+        long word=wordIds.get(1); associate(ownBook,word,1); associate(otherBook,word,1);
+        var before=get("/api/words/"+word,tokenA);
+        assertTrue(before.get("plan").isNull()); assertEquals(List.of(ownBook),ids(before.get("personalBooks")));
+        assertEquals("测试",before.get("translation").asText());
+        joinPlan(word); var planned=get("/api/words/"+word,tokenA).get("plan");
+        assertEquals("ACTIVE",planned.get("planStatus").asText()); assertFalse(planned.get("started").asBoolean());
+        assertFalse(planned.get("due").asBoolean()); assertTrue(planned.get("lastResult").isNull());
+        var other=get("/api/words/"+word,tokenB);
+        assertEquals(List.of(otherBook),ids(other.get("personalBooks"))); assertTrue(other.get("plan").get("started").asBoolean());
+        assertEquals(0,get("/api/learning-plan/words/"+word+"/history",tokenA).get("total").asInt());
+    }
+
+    @Test void wordDetailsValidateIdsAndUseShanghaiDueBoundaryWithoutWritesOrPerBookQueries() throws Exception {
+        clock.at(Instant.parse("2026-10-22T16:00:00Z")); tokenA=jwt.issue(a);
+        long word=wordIds.get(0); var state=state(a,word); state.setNextReviewAt(LocalDateTime.of(2026,10,23,0,0)); states.update(state);
+        assertTrue(get("/api/words/"+word,tokenA).get("plan").get("due").asBoolean());
+        planManagementStatus("PAUSED",word);
+        assertFalse(get("/api/words/"+word,tokenA).get("plan").get("due").asBoolean());
+        for(int i=0;i<4;i++) associate(personalBook(prefix+"_detail_"+i,""),word,1);
+        int writes=probe.writes.get(); probe.reads.set(0); get("/api/words/"+word,tokenA);
+        assertEquals(3,probe.reads.get()); assertEquals(writes,probe.writes.get());
+        assertEquals(400,call("GET","/api/words/0",null,tokenA).statusCode());
+        assertEquals(404,call("GET","/api/words/"+Long.MAX_VALUE,null,tokenA).statusCode());
+        assertEquals(401,call("GET","/api/words/"+word,null,null).statusCode());
+    }
+
+    @Test void weakWordsUseEffectiveLatestAnswersAndSeparateDailyFromPractice() throws Exception {
+        long word=wordIds.get(1); joinPlan(word); long daily=startDay().get("batchId").asLong();
+        long item=itemId(daily); dailyAnswer(daily,item,2,1);
+        var weak=weakWords("DAILY"); assertEquals(1,weak.get("total").asInt());
+        assertEquals(word,weak.get("records").get(0).get("wordId").asLong());
+        assertEquals("DAILY",weak.get("records").get(0).get("source").asText());
+        long practice=manualBatch(word); answer(practice,itemId(practice),1);
+        assertEquals(1,weakWords("DAILY").get("total").asInt()); assertEquals(0,weakWords("PRACTICE").get("total").asInt());
+        dailyAnswer(daily,item,1,2); assertEquals(0,weakWords("DAILY").get("total").asInt());
+        assertEquals("IN_PROGRESS",get(dailyPath(daily),tokenA).get("status").asText());
+    }
+
+    @Test void weakWordsCorrectionsReplaceFeedbackWithoutChangingAnswerCountOrOriginalAnswerOrder() throws Exception {
+        long word=wordIds.get(1); long first=manualBatch(word); long item=itemId(first); String key=requestId();
+        var body=Map.of("result",3,"requestId",key);
+        assertEquals(200,call("PUT",itemPath(first,item)+"/answer",body,tokenA).statusCode());
+        assertEquals(200,call("PUT",itemPath(first,item)+"/answer",body,tokenA).statusCode());
+        assertEquals(1,weakWords("PRACTICE").get("records").get(0).get("answerCount").asInt());
+        var correction=Map.of("result",1,"requestId",requestId());
+        assertEquals(200,call("PUT",itemPath(first,item)+"/answer",correction,tokenA).statusCode());
+        assertEquals(200,call("PUT",itemPath(first,item)+"/answer",correction,tokenA).statusCode());
+        assertEquals(0,weakWords("PRACTICE").get("total").asInt());
+        answer(first,item,2); assertEquals(2,weakWords("PRACTICE").get("records").get(0).get("lastResult").asInt());
+        assertEquals(1,weakWords("PRACTICE").get("records").get(0).get("answerCount").asInt());
+        long second=manualBatch(word); answer(second,itemId(second),1);
+        assertEquals(0,weakWords("PRACTICE").get("total").asInt());
+        assertEquals(409,call("PUT",itemPath(first,item)+"/answer",Map.of("result",3),tokenA).statusCode());
+    }
+
+    @Test void weakDailyCorrectionsAndReinforcementUseRealEventsIncludingAcrossDays() throws Exception {
+        long word=wordIds.get(1); joinPlan(word); long batch=startDay().get("batchId").asLong(); long item=itemId(batch);
+        var answer=dailyAnswer(batch,item,1,1); long log=answer.get("logId").asLong();
+        String key=requestId(); correction(batch,item,log,3,key); correction(batch,item,log,3,key);
+        var weak=weakWords("DAILY").get("records").get(0);
+        assertEquals(1,weak.get("answerCount").asInt()); assertEquals(3,weak.get("lastResult").asInt());
+        dailyAnswer(batch,item,2,2); assertEquals(2,weakWords("DAILY").get("records").get(0).get("answerCount").asInt());
+        String memory=stateSnapshot(),queue=batchSnapshot(batch);
+        var practiceResponse=weakPractice("DAILY",word); assertEquals(201,practiceResponse.statusCode(),practiceResponse.body());
+        long practice=json.readTree(practiceResponse.body()).at("/data/batchId").asLong(); answer(practice,itemId(practice),1);
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(batch));
+        assertEquals(1,weakWords("DAILY").get("total").asInt()); assertEquals(0,weakWords("PRACTICE").get("total").asInt());
+        advanceDays(1); assertEquals(1,weakWords("DAILY").get("total").asInt());
+        long next=startDay().get("batchId").asLong(); dailyAnswer(next,itemId(next),1,1);
+        assertEquals(0,weakWords("DAILY").get("total").asInt());
+        assertEquals(1,get("/api/learning/statistics/daily?date="+batches.selectOneById(batch).getLearningDate(),tokenA).get("unfamiliarCount").asInt());
+    }
+
+    @Test void weakWordsPaginateStablyValidateSourceAndNeverExposeOtherUsersEvents() throws Exception {
+        long practice=manualBatch(wordIds.get(1),wordIds.get(2)); var entries=batchDetails(practice);
+        for(var item:entries) answer(practice,item.getId(),3);
+        var one=get("/api/learning/weak-words?source=PRACTICE&size=1",tokenA);
+        var two=get("/api/learning/weak-words?source=PRACTICE&size=1&page=2",tokenA);
+        assertEquals(2,one.get("total").asInt());
+        assertEquals(wordIds.get(2).longValue(),one.get("records").get(0).get("wordId").asLong());
+        assertEquals(wordIds.get(1).longValue(),two.get("records").get(0).get("wordId").asLong());
+        assertEquals(0,get("/api/learning/weak-words?source=PRACTICE",tokenB).get("total").asInt());
+        assertEquals(0,get("/api/learning/weak-words",tokenA).get("total").asInt());
+        for(int i=0;i<3;i++) {
+            assertEquals(2,weakWords("PRACTICE").get("total").asInt());
+            assertEquals(0,get("/api/learning/weak-words?source=PRACTICE",tokenB).get("total").asInt());
+            assertEquals(0,weakWords("DAILY").get("total").asInt());
+        }
+        assertEquals(0,get("/api/learning/weak-words?source=PRACTICE&page=2147483647",tokenA).get("records").size());
+        for(String query:List.of("source=ALL","source=daily","source=","page=0","size=101","page=no"))
+            assertEquals(400,call("GET","/api/learning/weak-words?"+query,null,tokenA).statusCode());
+        assertEquals(401,call("GET","/api/learning/weak-words",null,null).statusCode());
+        probe.reads.set(0); get("/api/learning/weak-words?source=PRACTICE&size=1",tokenA); int count=probe.reads.get();
+        probe.reads.set(0); get("/api/learning/weak-words?source=PRACTICE&size=100",tokenA); assertEquals(count,probe.reads.get());
+        assertEquals(2,count);
+    }
+
+    @Test void weakWordsDoNotInferLegacyEventsFromCurrentMemoryOrOldDetails() throws Exception {
+        var practice=weakWords("PRACTICE");
+        assertEquals(0,practice.get("total").asInt()); assertFalse(practice.get("statisticsComplete").asBoolean());
+        assertEquals(1,practice.get("incompleteWordCount").asInt()); assertTrue(practice.get("firstRecordedAt").isNull());
+        assertEquals("RECORDED_EVENTS",practice.get("dataScope").asText());
+        var daily=weakWords("DAILY"); assertTrue(daily.get("statisticsComplete").asBoolean());
+        assertEquals(0,daily.get("total").asInt());
+        assertEquals(409,weakPractice("PRACTICE",wordIds.get(0)).statusCode());
+    }
+
+    @Test void weakPracticeCanUseCrossBookEventsAndPreservesPlansQueuesAndHistory() throws Exception {
+        long first=manualBatch(wordIds.get(1)); answer(first,itemId(first),3);
+        long second=created(Map.of("bookId",ownBook,"selectionType","MANUAL","wordIds",List.of(wordIds.get(2)))).get("batchId").asLong();
+        answer(second,itemId(second),3); personalBookWords("DELETE",ownBook,wordIds.get(2));
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong();
+        String memory=stateSnapshot(),queue=batchSnapshot(daily),source=batchSnapshot(first),secondSource=batchSnapshot(second);
+        long events=logCount(first)+logCount(second);
+        var response=weakPractice("PRACTICE",wordIds.get(2),wordIds.get(1),wordIds.get(2));
+        assertEquals(201,response.statusCode(),response.body()); var created=json.readTree(response.body()).get("data");
+        assertTrue(created.get("bookId").isNull()); long batch=created.get("batchId").asLong();
+        assertEquals("PRACTICE",batches.selectOneById(batch).getTaskType());
+        assertEquals(List.of(wordIds.get(2),wordIds.get(1)),batchDetails(batch).stream().map(LearningBatchItem::getWordId).toList());
+        var entries=batchDetails(batch); answer(batch,entries.get(0).getId(),1); answer(batch,entries.get(1).getId(),2);
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(daily)); assertEquals(source,batchSnapshot(first));
+        assertEquals(secondSource,batchSnapshot(second)); assertEquals(events,logCount(first)+logCount(second)); assertEquals(2,logCount(batch));
+        assertEquals(0,reviewLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch)).and(column("affects_schedule").eq(true))));
+        var result=get(batchPath(batch)+"/result",tokenA);
+        assertEquals(2,result.get("totalCount").asInt()); assertEquals(2,result.get("completedCount").asInt());
+        assertEquals(2,result.get("answerCount").asInt()); assertEquals(1,result.get("unfamiliarCount").asInt());
+        assertTrue(result.get("statisticsComplete").asBoolean());
+        var relearn=relearned(batch,null); assertTrue(relearn.get("bookId").isNull());
+        assertEquals(List.of(wordIds.get(1)),batchDetails(relearn.get("batchId").asLong()).stream().map(LearningBatchItem::getWordId).toList());
+    }
+
+    @Test void weakPracticeValidatesWholeSelectionAndTransactionalFailuresLeaveNoBatch() throws Exception {
+        long practice=manualBatch(wordIds.get(1)); answer(practice,itemId(practice),3); long before=countBatches();
+        assertEquals(409,weakPractice("DAILY",wordIds.get(1)).statusCode());
+        assertEquals(409,weakPractice("PRACTICE",wordIds.get(1),wordIds.get(2)).statusCode());
+        assertEquals(404,weakPractice("PRACTICE",wordIds.get(1),Long.MAX_VALUE).statusCode());
+        assertEquals(409,call("POST","/api/learning/weak-words/practice",Map.of("source","PRACTICE","wordIds",List.of(wordIds.get(1))),tokenB).statusCode());
+        assertEquals(before,countBatches());
+        for(Object body:List.of(Map.of("wordIds",List.of(wordIds.get(1))),Map.of("source","ALL","wordIds",List.of(wordIds.get(1))),
+                Map.of("source","PRACTICE","wordIds",List.of()),Map.of("source","PRACTICE","wordIds",List.of(0)),
+                Map.of("source","PRACTICE","wordIds",List.of(wordIds.get(1)),"userId",b),json.readTree("{\"source\":\"DAILY\",\"wordIds\":[null]}")))
+            assertEquals(400,call("POST","/api/learning/weak-words/practice",body,tokenA).statusCode());
+        for(String mapper:List.of("LearningBatchMapper","LearningBatchItemMapper")) {
+            probe.failAfterMapper="com.wordtrail.learning.mapper."+mapper;
+            try { assertEquals(500,weakPractice("PRACTICE",wordIds.get(1)).statusCode()); }
+            finally { probe.failAfterMapper=null; }
+            assertEquals(before,countBatches());
+        }
+    }
+
+    @Test void weakPracticeSupports100DifferentWordsDeduplicatesAndRejectsOversizeBeforeWriting() throws Exception {
+        var selected=new ArrayList<Long>();
+        for(int i=0;i<100;i++) {long word=word(prefix+"_weak_"+i); associate(systemBook,word,100+i); selected.add(word);}
+        long source=manualBatch(selected.toArray(Long[]::new));
+        for(var item:batchDetails(source)) answer(source,item.getId(),3);
+        var duplicates=new ArrayList<>(selected); duplicates.addAll(selected);
+        var accepted=weakPractice("PRACTICE",duplicates.toArray(Long[]::new));
+        assertEquals(201,accepted.statusCode(),accepted.body()); assertEquals(100,json.readTree(accepted.body()).at("/data/wordCount").asInt());
+        long before=countBatches(); selected.add(wordIds.get(1));
+        assertEquals(400,weakPractice("PRACTICE",selected.toArray(Long[]::new)).statusCode()); assertEquals(before,countBatches());
+        assertEquals(401,call("POST","/api/learning/weak-words/practice",Map.of("source","PRACTICE","wordIds",List.of(wordIds.get(1))),null).statusCode());
+    }
+
+    @Test void weakPracticeAndConcurrentCorrectionsSerializeWithoutUsingAnInvalidSelection() throws Exception {
+        long source=manualBatch(wordIds.get(1)); long item=itemId(source); answer(source,item,3);
+        long before=countBatches(); String memory=stateSnapshot(); var gate=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var create=pool.submit(()->{gate.await();return weakPractice("PRACTICE",wordIds.get(1));});
+            var fix=pool.submit(()->{gate.await();return call("PUT",itemPath(source,item)+"/answer",Map.of("result",1,"requestId",requestId()),tokenA);});
+            gate.countDown(); var created=create.get(15,TimeUnit.SECONDS); assertEquals(200,fix.get(15,TimeUnit.SECONDS).statusCode());
+            assertTrue(Set.of(201,409).contains(created.statusCode()),created.body());
+            assertEquals(before+(created.statusCode()==201?1:0),countBatches());
+        }
+        assertEquals(memory,stateSnapshot()); assertEquals(0,weakWords("PRACTICE").get("total").asInt());
+    }
+
+    @Test void practiceRecapCountsRealAnswersOnlyAndReflectsCorrectionRetries() throws Exception {
+        long batch=manualBatch(wordIds.get(1)); long item=itemId(batch);
+        var first=Map.of("result",3,"requestId",requestId());
+        call("PUT",itemPath(batch,item)+"/answer",first,tokenA); call("PUT",itemPath(batch,item)+"/answer",first,tokenA);
+        var fix=Map.of("result",1,"requestId",requestId());
+        call("PUT",itemPath(batch,item)+"/answer",fix,tokenA); call("PUT",itemPath(batch,item)+"/answer",fix,tokenA);
+        var recap=get(batchPath(batch)+"/result",tokenA);
+        assertEquals(1,recap.get("completedCount").asInt()); assertEquals(1,recap.get("answerCount").asInt());
+        assertEquals(0,recap.get("unfamiliarCount").asInt()); assertTrue(recap.get("statisticsComplete").asBoolean());
+        var row=get(batchPath(batch)+"/result/words",tokenA).get("records").get(0);
+        assertEquals(1,row.get("result").asInt()); assertEquals(1,row.get("answerCount").asInt());
+        assertTrue(row.get("statisticsComplete").asBoolean());
+        assertEquals(0,get(batchPath(batch)+"/result/words?result=3",tokenA).get("total").asInt());
+        assertEquals(404,call("GET",batchPath(batch)+"/result",null,tokenB).statusCode());
+    }
+
+    @Test void practiceRecapKeepsLegacyCompletionButDoesNotInventMissingAnswerCounts() throws Exception {
+        var legacy=batches.selectListByQuery(QueryWrapper.create().where(column("user_id").eq(a))
+            .and(column("status").eq("COMPLETED"))).getFirst();
+        var recap=get(batchPath(legacy.getId())+"/result",tokenA);
+        assertEquals(1,recap.get("completedCount").asInt()); assertEquals(0,recap.get("answerCount").asInt());
+        assertEquals(1,recap.get("unfamiliarCount").asInt()); assertFalse(recap.get("statisticsComplete").asBoolean());
+        assertEquals(1,recap.get("incompleteWordCount").asInt());
+        var row=get(batchPath(legacy.getId())+"/result/words",tokenA).get("records").get(0);
+        assertEquals(0,row.get("answerCount").asInt()); assertFalse(row.get("statisticsComplete").asBoolean());
     }
 
     private void rollbackAfterWrite(String mapper) throws Exception {

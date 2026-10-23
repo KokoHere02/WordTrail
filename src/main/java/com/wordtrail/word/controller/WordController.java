@@ -5,7 +5,9 @@ import com.wordtrail.common.response.PageVO;
 import com.wordtrail.word.dto.WordSearchQuery;
 import com.wordtrail.word.service.WordService;
 import com.wordtrail.word.vo.DictionaryWordVO;
+import com.wordtrail.word.vo.WordDetailVO;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -14,6 +16,11 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class WordController {
     private final WordService words;
+
+    @GetMapping("/{wordId}")
+    public ApiResponse<WordDetailVO> detail(@PathVariable @Positive long wordId) {
+        return ApiResponse.ok(words.detail(wordId));
+    }
 
     @GetMapping
     public ApiResponse<PageVO<DictionaryWordVO>> search(@Valid @ModelAttribute WordSearchQuery query) {

@@ -3,10 +3,17 @@ package com.wordtrail.word.mapper;
 import com.mybatisflex.core.BaseMapper;
 import com.wordtrail.word.entity.Word;
 import com.wordtrail.word.vo.DictionaryWordVO;
+import com.wordtrail.word.vo.WordDetailVO;
 import java.util.List;
 import org.apache.ibatis.annotations.*;
 
 public interface WordMapper extends BaseMapper<Word> {
+    @Select("""
+        SELECT b.id,b.name FROM word_book b JOIN word_book_item i ON i.book_id=b.id
+        WHERE b.owner_id=#{userId} AND i.word_id=#{wordId} ORDER BY b.id ASC
+        """)
+    List<WordDetailVO.PersonalBook> personalBooks(@Param("userId") long userId, @Param("wordId") long wordId);
+
     String SEARCH_FROM = """
         FROM word w WHERE
         <choose><when test="matchType == 'EXACT'">w.word = #{keyword}</when>
