@@ -52,6 +52,7 @@ class LearningIntegrationTests {
         final AtomicInteger writes = new AtomicInteger();
         volatile String failAfterMapper;
         volatile Runnable afterNextStateRead;
+        volatile Runnable afterNextInsightsRead;
 
         @Override public Object intercept(Invocation invocation) throws Throwable {
             String statement = ((MappedStatement) invocation.getArgs()[0]).getId();
@@ -69,6 +70,11 @@ class LearningIntegrationTests {
                 var action = afterNextStateRead;
                 afterNextStateRead = null;
                 action.run();
+            }
+            if (invocation.getMethod().getName().equals("query")
+                    && statement.startsWith("com.wordtrail.learning.mapper.LearningInsightsMapper.")
+                    && afterNextInsightsRead != null) {
+                var action = afterNextInsightsRead; afterNextInsightsRead = null; action.run();
             }
             if (invocation.getMethod().getName().equals("update")
                     && failAfterMapper != null && statement.startsWith(failAfterMapper + ".")) {
@@ -132,6 +138,7 @@ class LearningIntegrationTests {
         IsolatedDatabaseGuard.check(dataSource);
         probe.failAfterMapper = null;
         probe.afterNextStateRead = null;
+        probe.afterNextInsightsRead = null;
         clock.reset();
         prefix = "fixture" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         a = user(prefix + "_a"); b = user(prefix + "_b");
@@ -154,6 +161,7 @@ class LearningIntegrationTests {
     @AfterEach void cleanup() {
         probe.failAfterMapper = null;
         probe.afterNextStateRead = null;
+        probe.afterNextInsightsRead = null;
         if (!userIds.isEmpty()) {
             learningSettings.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             reviewLogs.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds))
@@ -3070,6 +3078,215 @@ class LearningIntegrationTests {
         assertEquals(1,recap.get("incompleteWordCount").asInt());
         var row=get(batchPath(legacy.getId())+"/result/words",tokenA).get("records").get(0);
         assertEquals(0,row.get("answerCount").asInt()); assertFalse(row.get("statisticsComplete").asBoolean());
+    }
+
+    private void insightDate(LocalDate date) {
+        clock.at(date.atTime(9,0).atZone(ZoneId.of("Asia/Shanghai")).toInstant());
+        tokenA=jwt.issue(a); tokenB=jwt.issue(b);
+    }
+    private JsonNode insightSummary(String source) throws Exception {
+        return get("/api/learning/statistics/summary?source="+source,tokenA);
+    }
+    private JsonNode insightTrend(String source,int days) throws Exception {
+        return get("/api/learning/statistics/trends?source="+source+"&days="+days,tokenA);
+    }
+    private JsonNode insightDay(JsonNode trend,LocalDate date) {
+        for(var row:trend.get("records")) if(date.toString().equals(row.get("learningDate").asText())) return row;
+        throw new AssertionError("Missing trend day "+date);
+    }
+
+    @Test void insightsDefaultToSevenShanghaiDaysAndNeverCreateRecords() throws Exception {
+        var today=LocalDate.of(2028,3,1); insightDate(today);
+        long before=countBatches(); int writes=probe.writes.get();
+        var trend=get("/api/learning/statistics/trends",tokenA);
+        assertEquals("DAILY",trend.get("source").asText()); assertEquals(7,trend.get("records").size());
+        assertEquals(today.minusDays(6).toString(),trend.get("from").asText());
+        assertEquals(today.toString(),trend.get("to").asText());
+        for(var row:trend.get("records")) {
+            assertEquals(0,row.get("completedCount").asInt()); assertEquals(0,row.get("answerCount").asInt());
+            assertEquals(0,row.get("studiedCount").asInt()); assertFalse(row.get("hasRecordedAnswers").asBoolean());
+        }
+        var thirty=insightTrend("DAILY",30); assertEquals(30,thirty.get("records").size());
+        assertEquals("2028-02-01",thirty.get("from").asText()); insightDay(thirty,LocalDate.of(2028,2,29));
+        var summary=get("/api/learning/statistics/summary",tokenA);
+        assertEquals(0,summary.get("currentStreak").asInt()); assertEquals(0,summary.get("longestStreak").asInt());
+        assertEquals(0,summary.get("totalStudyDays").asInt()); assertFalse(summary.get("hasStudiedToday").asBoolean());
+        var goal=summary.get("goal"); assertEquals(20,goal.get("dailyTarget").asInt());
+        assertEquals(20,goal.get("remainingCount").asInt()); assertFalse(goal.get("reached").asBoolean());
+        assertEquals("SETTING",goal.get("targetSource").asText()); assertTrue(goal.get("batchId").isNull());
+        assertEquals(writes,probe.writes.get()); assertEquals(before,countBatches());
+    }
+
+    @Test void insightsValidateWindowAndSourceAndIsolateRepeatedUserSwitches() throws Exception {
+        long batch=manualBatch(wordIds.get(1)); answer(batch,itemId(batch),1);
+        for(String query:List.of("days=0","days=1","days=8","days=29","days=31","days=7.0","days=abc","days=",
+                "days=2147483648","source=ALL","source=daily","source="))
+            assertEquals(400,call("GET","/api/learning/statistics/trends?"+query,null,tokenA).statusCode(),query);
+        for(String endpoint:List.of("trends","summary")) {
+            assertEquals(401,call("GET","/api/learning/statistics/"+endpoint,null,null).statusCode());
+            assertEquals(400,call("GET","/api/learning/statistics/"+endpoint+"?source=ALL",null,tokenA).statusCode());
+            for(int i=0;i<3;i++) {
+                var own=get("/api/learning/statistics/"+endpoint+"?source=PRACTICE",tokenA);
+                var other=get("/api/learning/statistics/"+endpoint+"?source=PRACTICE&user_id="+a,tokenB);
+                assertEquals(1,own.get("summary".equals(endpoint)?"todayAnswerCount":"totalAnswerCount").asInt());
+                assertEquals(0,other.get("summary".equals(endpoint)?"todayAnswerCount":"totalAnswerCount").asInt());
+            }
+        }
+    }
+
+    @Test void insightsDailyTrendReusesDailyCompletionsAndPadsEmptyDaysAcrossLeapMonth() throws Exception {
+        var today=LocalDate.of(2028,3,1);
+        for(int i=0;i<3;i++) {
+            insightDate(today.minusDays(4-i*2)); joinPlan(wordIds.get(i+1));
+            var task=startDay(); long batch=task.get("batchId").asLong();
+            while(!get(dailyPath(batch),tokenA).get("nextItemId").isNull()) {
+                long item=get(dailyPath(batch),tokenA).get("nextItemId").asLong(); dailyAnswer(batch,item,1,1);
+            }
+        }
+        var trend=insightTrend("DAILY",7); long completions=0,answers=0;
+        for(var row:trend.get("records")) {
+            var date=LocalDate.parse(row.get("learningDate").asText()); var old=statisticsDaily(date);
+            assertEquals(old.get("completedCount"),row.get("completedCount"));
+            assertEquals(old.get("answerCount"),row.get("answerCount"));
+            completions+=row.get("completedCount").asLong(); answers+=row.get("answerCount").asLong();
+        }
+        assertEquals(completions,trend.get("totalCompletedCount").asLong());
+        assertEquals(answers,trend.get("totalAnswerCount").asLong());
+        assertEquals(0,insightDay(trend,today.minusDays(1)).get("answerCount").asInt());
+        assertTrue(trend.get("coverage").get("statisticsComplete").asBoolean());
+    }
+
+    @Test void insightsReinforcementCorrectionRetriesAndSkippingDoNotInflateDaysOrGoals() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); long item=itemId(batch); String key=requestId();
+        var original=dailyAnswer(batch,item,1,1,key); dailyAnswer(batch,item,1,1,key);
+        String correctionKey=requestId(); correction(batch,item,original.get("logId").asLong(),3,correctionKey);
+        correction(batch,item,original.get("logId").asLong(),3,correctionKey);
+        var corrected=insightSummary("DAILY"); assertEquals(1,corrected.get("todayAnswerCount").asInt());
+        assertEquals(0,corrected.get("todayCompletedCount").asInt()); assertEquals(1,corrected.get("totalStudyDays").asInt());
+        for(int attempt=2;attempt<=4;attempt++) dailyAnswer(batch,item,1,attempt);
+        var summary=insightSummary("DAILY"); assertEquals(4,summary.get("todayAnswerCount").asInt());
+        assertEquals(1,summary.get("todayStudiedCount").asInt()); assertEquals(1,summary.get("todayCompletedCount").asInt());
+        assertEquals(19,summary.get("goal").get("remainingCount").asInt());
+        var point=insightDay(insightTrend("DAILY",7),statisticsDate());
+        assertEquals(4,point.get("answerCount").asInt()); assertEquals(1,point.get("completedCount").asInt());
+        planManagementStatus("PAUSED",wordIds.get(1)); var skipped=insightSummary("DAILY");
+        assertEquals(0,skipped.get("todayCompletedCount").asInt()); assertEquals(4,skipped.get("todayAnswerCount").asInt());
+        assertEquals(1,skipped.get("currentStreak").asInt()); assertTrue(skipped.get("hasStudiedToday").asBoolean());
+        assertEquals(20,skipped.get("goal").get("remainingCount").asInt());
+    }
+
+    @Test void insightsPracticeDeduplicatesWordsAcrossBatchesAndDoesNotCountCorrectionsTwice() throws Exception {
+        long one=manualBatch(wordIds.get(1)),two=manualBatch(wordIds.get(1)); long item=itemId(two);
+        answer(one,itemId(one),3); var body=Map.of("result",3,"requestId",requestId());
+        call("PUT",itemPath(two,item)+"/answer",body,tokenA); call("PUT",itemPath(two,item)+"/answer",body,tokenA);
+        var fix=Map.of("result",1,"requestId",requestId());
+        call("PUT",itemPath(two,item)+"/answer",fix,tokenA); call("PUT",itemPath(two,item)+"/answer",fix,tokenA);
+        var summary=insightSummary("PRACTICE"); assertEquals(1,summary.get("todayStudiedCount").asInt());
+        assertEquals(1,summary.get("todayCompletedCount").asInt()); assertEquals(2,summary.get("todayAnswerCount").asInt());
+        assertEquals(1,summary.get("totalStudyDays").asInt()); assertTrue(summary.get("goal").isNull());
+        var day=insightDay(insightTrend("PRACTICE",7),statisticsDate());
+        assertEquals(1,day.get("completedCount").asInt()); assertEquals(2,day.get("answerCount").asInt());
+        var daily=insightSummary("DAILY"); assertEquals(0,daily.get("totalStudyDays").asInt());
+        assertEquals(20,daily.get("goal").get("remainingCount").asInt());
+    }
+
+    @Test void insightsStreaksSpanHistoryAndKeepYesterdayRunUntilNextMissedDay() throws Exception {
+        var base=LocalDate.of(2026,1,10);
+        for(int offset:List.of(0,1,2,5,6)) {
+            insightDate(base.plusDays(offset)); long batch=manualBatch(wordIds.get(1)); answer(batch,itemId(batch),1);
+        }
+        var current=insightSummary("PRACTICE"); assertEquals(2,current.get("currentStreak").asInt());
+        assertEquals(3,current.get("longestStreak").asInt()); assertEquals(5,current.get("totalStudyDays").asInt());
+        insightDate(base.plusDays(7)); var yesterday=insightSummary("PRACTICE");
+        assertEquals(2,yesterday.get("currentStreak").asInt()); assertFalse(yesterday.get("hasStudiedToday").asBoolean());
+        insightDate(base.plusDays(8)); assertEquals(0,insightSummary("PRACTICE").get("currentStreak").asInt());
+        insightDate(base.plusDays(50)); var distant=insightSummary("PRACTICE");
+        assertEquals(3,distant.get("longestStreak").asInt()); assertEquals(5,distant.get("totalStudyDays").asInt());
+        assertEquals(0,insightTrend("PRACTICE",30).get("totalAnswerCount").asInt());
+    }
+
+    @Test void insightsPracticeSpanningMidnightUsesAnswerDatesAndEachSourceHasItsOwnStreak() throws Exception {
+        var yesterday=LocalDate.of(2026,10,22); insightDate(yesterday);
+        long practice=manualBatch(wordIds.get(1),wordIds.get(2)); var items=batchDetails(practice);
+        answer(practice,items.get(0).getId(),3);
+        insightDate(yesterday.plusDays(1)); answer(practice,items.get(1).getId(),1);
+        var summary=insightSummary("PRACTICE"); assertEquals(2,summary.get("currentStreak").asInt());
+        assertEquals(1,summary.get("todayCompletedCount").asInt());
+        var trend=insightTrend("PRACTICE",7);
+        assertEquals(1,insightDay(trend,yesterday).get("completedCount").asInt());
+        assertEquals(1,insightDay(trend,yesterday.plusDays(1)).get("completedCount").asInt());
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); dailyAnswer(daily,itemId(daily),1,1);
+        assertEquals(1,insightSummary("DAILY").get("currentStreak").asInt());
+        assertEquals(2,insightSummary("PRACTICE").get("currentStreak").asInt());
+    }
+
+    @Test void insightsGoalUsesTaskSnapshotAndContinuationCannotMakeRemainingNegative() throws Exception {
+        call("PUT","/api/learning/settings",Map.of("dailyTarget",1),tokenA);
+        assertEquals(1,insightSummary("DAILY").get("goal").get("dailyTarget").asInt());
+        joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong();
+        call("PUT","/api/learning/settings",Map.of("dailyTarget",50),tokenA);
+        var before=insightSummary("DAILY").get("goal"); assertEquals(1,before.get("dailyTarget").asInt());
+        assertEquals("TASK_SNAPSHOT",before.get("targetSource").asText()); assertEquals(batch,before.get("batchId").asLong());
+        dailyAnswer(batch,itemId(batch),1,1); var reached=insightSummary("DAILY").get("goal");
+        assertTrue(reached.get("reached").asBoolean()); assertEquals(0,reached.get("remainingCount").asInt());
+        startDay(); long next=get(dailyPath(batch),tokenA).get("nextItemId").asLong(); dailyAnswer(batch,next,1,1);
+        var continued=insightSummary("DAILY"); assertEquals(2,continued.get("todayCompletedCount").asInt());
+        assertEquals(0,continued.get("goal").get("remainingCount").asInt());
+        assertEquals(1,continued.get("goal").get("dailyTarget").asInt());
+        advanceDays(1); var nextDay=insightSummary("DAILY");
+        assertEquals(50,nextDay.get("goal").get("dailyTarget").asInt());
+        assertEquals("SETTING",nextDay.get("goal").get("targetSource").asText());
+    }
+
+    @Test void insightsCompletedSmallTaskCanStillBeBelowTargetAndPracticeDoesNotFillIt() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); dailyAnswer(batch,itemId(batch),1,1);
+        long practice=manualBatch(wordIds.get(2)); answer(practice,itemId(practice),1);
+        var daily=insightSummary("DAILY"); assertEquals("COMPLETED",daily.get("goal").get("taskStatus").asText());
+        assertFalse(daily.get("goal").get("reached").asBoolean()); assertEquals(19,daily.get("goal").get("remainingCount").asInt());
+        assertEquals(1,daily.get("todayCompletedCount").asInt()); assertTrue(insightSummary("PRACTICE").get("goal").isNull());
+    }
+
+    @Test void insightsLegacyDataMarksCoverageAndDoesNotInventAnswersOrStreaks() throws Exception {
+        var practice=insightSummary("PRACTICE"); assertFalse(practice.get("coverage").get("statisticsComplete").asBoolean());
+        assertEquals(1,practice.get("coverage").get("incompleteWordCount").asInt());
+        assertEquals(0,practice.get("totalStudyDays").asInt()); assertEquals(0,practice.get("todayAnswerCount").asInt());
+        assertTrue(practice.get("coverage").get("firstRecordedAt").isNull());
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong();
+        var item=details.selectOneById(itemId(batch)); item.setLearningStatus("DONE"); item.setResult(1);
+        item.setAnsweredAt(statisticsDate().atTime(9,0)); item.setCompletedAt(item.getAnsweredAt()); details.update(item);
+        var daily=insightSummary("DAILY"); assertEquals(1,daily.get("todayCompletedCount").asInt());
+        assertEquals(0,daily.get("todayAnswerCount").asInt()); assertEquals(0,daily.get("totalStudyDays").asInt());
+        assertFalse(daily.get("hasStudiedToday").asBoolean()); assertFalse(daily.get("coverage").get("statisticsComplete").asBoolean());
+        var trend=insightTrend("DAILY",7); assertEquals(1,trend.get("totalCompletedCount").asInt());
+        assertEquals(0,trend.get("totalAnswerCount").asInt());
+    }
+
+    @Test void insightsShanghaiMidnightAndMidRequestRolloverUseOneDate() throws Exception {
+        clock.at(Instant.parse("2026-10-22T15:59:59Z")); tokenA=jwt.issue(a);
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); dailyAnswer(batch,itemId(batch),1,1);
+        probe.afterNextInsightsRead=()->clock.advanceSeconds(1);
+        var old=insightSummary("DAILY"); assertEquals("2026-10-22",old.get("learningDate").asText());
+        assertEquals(batch,old.get("goal").get("batchId").asLong()); assertEquals(1,old.get("todayAnswerCount").asInt());
+        var next=insightSummary("DAILY"); assertEquals("2026-10-23",next.get("learningDate").asText());
+        assertFalse(next.get("hasStudiedToday").asBoolean()); assertEquals(1,next.get("currentStreak").asInt());
+        assertTrue(next.get("goal").get("batchId").isNull());
+        var trend=insightTrend("DAILY",7); assertEquals("2026-10-23",trend.get("to").asText());
+        assertEquals(1,insightDay(trend,LocalDate.of(2026,10,22)).get("answerCount").asInt());
+    }
+
+    @Test void insightsQueriesStayBoundedAndNeverWriteLearningState() throws Exception {
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); dailyAnswer(daily,itemId(daily),1,1);
+        long practice=manualBatch(wordIds.get(2)); answer(practice,itemId(practice),3);
+        String state=stateSnapshot(),queue=batchSnapshot(daily),exercise=batchSnapshot(practice); long logs=logCount(daily)+logCount(practice);
+        int writes=probe.writes.get();
+        for(String source:List.of("DAILY","PRACTICE")) {
+            probe.reads.set(0); insightTrend(source,7); int seven=probe.reads.get();
+            probe.reads.set(0); insightTrend(source,30); assertEquals(seven,probe.reads.get());
+            assertEquals("DAILY".equals(source)?3:2,seven);
+            probe.reads.set(0); insightSummary(source); assertEquals("DAILY".equals(source)?4:2,probe.reads.get());
+        }
+        assertEquals(writes,probe.writes.get()); assertEquals(state,stateSnapshot()); assertEquals(queue,batchSnapshot(daily));
+        assertEquals(exercise,batchSnapshot(practice)); assertEquals(logs,logCount(daily)+logCount(practice));
     }
 
     private void rollbackAfterWrite(String mapper) throws Exception {
