@@ -23,7 +23,7 @@ class UserServiceTests {
         request.setUsername("RACE_USER");
         request.setPassword("password123");
         var service = new UserService(users, mock(RefreshTokenMapper.class), passwords,
-            mock(JwtTokenService.class), Clock.systemUTC(), Duration.ofDays(7));
+            mock(JwtTokenService.class), Clock.systemUTC(), Duration.ofDays(7),mock(AuthSessionMapper.class),mock(CurrentUser.class));
         var error = assertThrows(BusinessException.class, () -> service.register(request));
         assertEquals(409, error.status().value());
         assertEquals("USERNAME_EXISTS", error.code());

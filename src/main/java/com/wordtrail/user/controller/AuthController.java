@@ -9,6 +9,9 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
+import com.wordtrail.common.response.PageVO;
+import com.wordtrail.learning.dto.WordHistoryQuery;
+import jakarta.validation.constraints.Pattern;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -40,4 +43,9 @@ public class AuthController {
         users.logout(request.getRefreshToken());
         return ApiResponse.ok(null);
     }
+    @GetMapping("/sessions") public ApiResponse<PageVO<AuthSessionVO>> sessions(@Valid @ModelAttribute WordHistoryQuery query){return ApiResponse.ok(users.sessions(query));}
+    @PostMapping("/sessions/{sessionId}/revoke")
+    public ApiResponse<Void> revoke(@PathVariable @Pattern(regexp="[a-f0-9]{32}") String sessionId){users.revokeSession(sessionId);return ApiResponse.ok(null);}
+    @PutMapping("/password") public ApiResponse<Void> password(@Valid @RequestBody ChangePasswordRequest request){users.changePassword(request);return ApiResponse.ok(null);}
+    @PostMapping("/logout-others") public ApiResponse<TokenVO> logoutOthers(@Valid @RequestBody LogoutOthersRequest request){return ApiResponse.ok(users.logoutOthers(request));}
 }

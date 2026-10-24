@@ -14,6 +14,7 @@ public class AuthInterceptor implements AsyncHandlerInterceptor {
         "/api/auth/register", "/api/auth/login", "/api/auth/refresh", "/api/auth/logout");
     private final JwtTokenService tokens;
     private final CurrentUser currentUser;
+    private final AuthSessionGuard sessions;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
@@ -35,7 +36,9 @@ public class AuthInterceptor implements AsyncHandlerInterceptor {
         if (!token.matches("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+")) {
             throw JwtTokenService.unauthorized();
         }
-        currentUser.bind(tokens.verify(token));
+        var identity=tokens.identity(token);
+        sessions.require(identity);
+        currentUser.bind(identity.userId(),identity.sessionId(),identity.authVersion());
         return true;
     }
 

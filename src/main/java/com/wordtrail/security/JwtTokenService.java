@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class JwtTokenService {
+    public record Identity(long userId,long authVersion,String sessionId) {}
     private final SecretKey key;
     private final JwtParser parser;
     private final String issuer;
@@ -54,14 +55,23 @@ public class JwtTokenService {
     }
 
     public String issue(long userId) {
+        return issue(userId,0,null);
+    }
+    public String issue(long userId,long authVersion,String sessionId) {
         if (userId <= 0) { throw new IllegalArgumentException("Invalid user ID"); }
+        if(authVersion<0 || sessionId!=null && !sessionId.matches("[a-f0-9]{32}")) throw new IllegalArgumentException("Invalid token identity");
         Instant now = clock.instant();
-        return Jwts.builder().subject(Long.toString(userId)).issuer(issuer)
+        var builder=Jwts.builder().subject(Long.toString(userId)).issuer(issuer)
             .issuedAt(Date.from(now)).expiration(Date.from(now.plus(accessTtl)))
-            .id(UUID.randomUUID().toString()).signWith(key, Jwts.SIG.HS256).compact();
+            .id(UUID.randomUUID().toString()).claim("av",authVersion);
+        if(sessionId!=null) builder.claim("sid",sessionId);
+        return builder.signWith(key,Jwts.SIG.HS256).compact();
     }
 
     public long verify(String token) {
+        return identity(token).userId();
+    }
+    public Identity identity(String token) {
         try {
             var claims = parser.parseSignedClaims(token).getPayload();
             if (claims.getSubject() == null || !claims.getSubject().matches("[1-9][0-9]{0,18}")
@@ -73,7 +83,18 @@ public class JwtTokenService {
             }
             long userId = Long.parseLong(claims.getSubject());
             if (userId <= 0) { throw unauthorized(); }
-            return userId;
+            Object version=claims.get("av");long authVersion=0;
+            if(version!=null) {
+                if(!(version instanceof Number) || !version.toString().matches("[0-9]{1,19}")) throw unauthorized();
+                authVersion=Long.parseLong(version.toString());
+                if(authVersion<0) throw unauthorized();
+            }
+            Object rawSession=claims.get("sid");String sessionId=null;
+            if(rawSession!=null) {
+                if(!(rawSession instanceof String sid) || !sid.matches("[a-f0-9]{32}")) throw unauthorized();
+                sessionId=(String)rawSession;
+            }
+            return new Identity(userId,authVersion,sessionId);
         } catch (JwtException | IllegalArgumentException ex) {
             // Never expose parser messages or the rejected token.
             throw unauthorized();

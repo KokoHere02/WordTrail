@@ -13,7 +13,7 @@ class AuthInterceptorTests {
     private final JwtTokenService tokens = new JwtTokenService(
         Base64.getEncoder().encodeToString(io.jsonwebtoken.Jwts.SIG.HS256.key().build().getEncoded()),
         "wordtrail", Duration.ofMinutes(30), Clock.systemUTC());
-    private final AuthInterceptor interceptor = new AuthInterceptor(tokens, current);
+    private final AuthInterceptor interceptor = new AuthInterceptor(tokens, current,org.mockito.Mockito.mock(AuthSessionGuard.class));
     private final MockHttpServletResponse response = new MockHttpServletResponse();
 
     @AfterEach void cleanup() { current.clear(); }

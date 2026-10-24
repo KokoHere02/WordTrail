@@ -119,6 +119,7 @@ class LearningIntegrationTests {
     private final List<Long> userIds = new ArrayList<>(), bookIds = new ArrayList<>(), wordIds = new ArrayList<>();
     @Autowired private javax.sql.DataSource dataSource;
     @Autowired private UserLearningSettingMapper learningSettings;
+    @Autowired private com.wordtrail.user.mapper.AuthSessionMapper authSessions;
     private long a, b, systemBook, ownBook, otherBook, emptyBook;
     private String tokenA, tokenB, prefix;
 
@@ -183,6 +184,7 @@ class LearningIntegrationTests {
         if (!wordIds.isEmpty()) { words.deleteBatchByIds(wordIds); }
         if (!userIds.isEmpty()) {
             refreshTokens.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
+            authSessions.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             users.deleteBatchByIds(userIds);
         }
     }

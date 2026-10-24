@@ -21,6 +21,7 @@ public class UserAccount {
     @Column("password_hash")
     private String passwordHash;
     private String nickname;
+    @JsonIgnore private Long authVersion;
     @Column("created_at")
     private LocalDateTime createdAt;
     @Column("updated_at")

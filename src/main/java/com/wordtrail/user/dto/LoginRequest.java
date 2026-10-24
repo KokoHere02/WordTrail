@@ -15,4 +15,6 @@ public class LoginRequest {
     @NotNull(message = "password 不能为空")
     @CodePointLength(min = 8, max = 64, message = "password 必须为 8～64 个字符")
     private String password;
+    @CodePointLength(max=100,message="deviceName 最长 100 个字符")
+    private String deviceName;
 }

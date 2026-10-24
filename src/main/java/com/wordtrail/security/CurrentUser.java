@@ -4,15 +4,19 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class CurrentUser {
-    private static final ThreadLocal<Long> USER_ID = new ThreadLocal<>();
+    private record Principal(long id,String sessionId,long authVersion) {}
+    private static final ThreadLocal<Principal> PRINCIPAL = new ThreadLocal<>();
 
     public long id() {
-        Long id = USER_ID.get();
-        if (id == null) { throw JwtTokenService.unauthorized(); }
-        return id;
+        var principal=PRINCIPAL.get();
+        if(principal==null) throw JwtTokenService.unauthorized();
+        return principal.id();
     }
 
     // Only the interceptor may bind a verified identity.
-    void bind(long userId) { USER_ID.set(userId); }
-    void clear() { USER_ID.remove(); }
+    public String sessionId(){id();return PRINCIPAL.get().sessionId();}
+    public long authVersion(){id();return PRINCIPAL.get().authVersion();}
+    void bind(long userId) { bind(userId,null,0); }
+    void bind(long userId,String sessionId,long authVersion){PRINCIPAL.set(new Principal(userId,sessionId,authVersion));}
+    void clear() { PRINCIPAL.remove(); }
 }

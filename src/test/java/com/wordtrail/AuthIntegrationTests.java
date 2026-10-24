@@ -44,6 +44,15 @@ class AuthIntegrationTests {
 
     @TestConfiguration static class TestTime {
         @Bean @Primary TestClock testClock() { return new TestClock(); }
+        @Bean AuthFailureProbe authFailureProbe(){return new AuthFailureProbe();}
+    }
+    @org.apache.ibatis.plugin.Intercepts(@org.apache.ibatis.plugin.Signature(type=org.apache.ibatis.executor.Executor.class,method="update",args={org.apache.ibatis.mapping.MappedStatement.class,Object.class}))
+    static class AuthFailureProbe implements org.apache.ibatis.plugin.Interceptor {
+        volatile String failAfterMapper;
+        @Override public Object intercept(org.apache.ibatis.plugin.Invocation invocation) throws Throwable {
+            Object result=invocation.proceed();String id=((org.apache.ibatis.mapping.MappedStatement)invocation.getArgs()[0]).getId();
+            if(failAfterMapper!=null && id.startsWith(failAfterMapper+".")) throw new IllegalStateException("Injected authentication write failure");return result;
+        }
     }
 
     private final Environment environment;
@@ -72,15 +81,21 @@ class AuthIntegrationTests {
     }
 
     @Autowired private javax.sql.DataSource dataSource;
+    @Autowired private AuthSessionMapper authSessions;
+    @Autowired private com.wordtrail.security.JwtTokenService jwt;
+    @Autowired private AuthFailureProbe authFailure;
 
     @BeforeEach void resetTime() throws Exception {
         IsolatedDatabaseGuard.check(dataSource);
         clock.reset();
+        authFailure.failAfterMapper=null;
     }
 
     @AfterEach void cleanup() {
+        authFailure.failAfterMapper=null;
         for (Long id : createdUsers) {
             refreshTokens.deleteByQuery(QueryWrapper.create().where(column("user_id").eq(id)));
+            authSessions.deleteByQuery(QueryWrapper.create().where(column("user_id").eq(id)));
             users.deleteById(id);
         }
         createdUsers.clear();
@@ -281,8 +296,7 @@ class AuthIntegrationTests {
         assertEquals(200, call("POST", "/api/auth/logout", Map.of("refreshToken", "unknown"), null).statusCode());
         assertEquals(401, refresh(first.get("refreshToken").asText()).statusCode());
         assertEquals(200, refresh(second.get("refreshToken").asText()).statusCode());
-        // Accepted first-version limitation: logout cannot revoke already issued Access Tokens.
-        assertEquals(200, call("GET", "/api/auth/me", null, first.get("accessToken").asText()).statusCode());
+        assertEquals(401, call("GET", "/api/auth/me", null, first.get("accessToken").asText()).statusCode());
     }
 
     @Test void accountsAndSequentialRequestsHaveIndependentIdentities() throws Exception {
@@ -296,6 +310,88 @@ class AuthIntegrationTests {
             assertEquals(token.equals(a) ? first : second, json.readTree(me.body()).at("/data/username").asText());
             assertEquals(401, call("GET", "/api/auth/me", null, null).statusCode());
         }
+    }
+
+    private JsonNode sessionPage(String access) throws Exception {var response=call("GET","/api/auth/sessions",null,access);assertEquals(200,response.statusCode());return json.readTree(response.body()).get("data");}
+    private String currentSession(String access) throws Exception {for(var row:sessionPage(access).get("records"))if(row.get("current").asBoolean())return row.get("sessionId").asString();throw new AssertionError("Current session not listed");}
+
+    @Test void deviceSessionsListCurrentDeviceAndAllowOnlyOwnSessionRevocation() throws Exception {
+        String username=name(),other=name();register(username,"password123");register(other,"password123");
+        var first=pair(username,"password123");var second=pair(username,"password123");var foreign=pair(other,"password123");String a=first.get("accessToken").asString(),b=second.get("accessToken").asString();
+        assertEquals(2,sessionPage(a).get("total").asLong());String foreignId=currentSession(foreign.get("accessToken").asString());
+        assertEquals(404,call("POST","/api/auth/sessions/"+foreignId+"/revoke",null,a).statusCode());
+        String target=currentSession(b);assertEquals(200,call("POST","/api/auth/sessions/"+target+"/revoke",null,a).statusCode());assertEquals(200,call("POST","/api/auth/sessions/"+target+"/revoke",null,a).statusCode());
+        assertEquals(401,call("GET","/api/auth/me",null,b).statusCode());assertEquals(401,refresh(second.get("refreshToken").asString()).statusCode());assertEquals(200,call("GET","/api/auth/me",null,a).statusCode());assertEquals(1,sessionPage(a).get("total").asLong());
+    }
+
+    @Test void logoutOtherDevicesRotatesCurrentPairAndImmediatelyInvalidatesOldAccessAndRefreshTokens() throws Exception {
+        String username=name();register(username,"password123");var first=pair(username,"password123");var second=pair(username,"password123");String access=first.get("accessToken").asString();
+        assertEquals(401,call("POST","/api/auth/logout-others",Map.of("currentPassword","wrong-password"),access).statusCode());assertEquals(2,sessionPage(access).get("total").asLong());
+        var response=call("POST","/api/auth/logout-others",Map.of("currentPassword","password123"),access);assertEquals(200,response.statusCode());var next=json.readTree(response.body()).get("data");
+        for(var previous:List.of(first,second)){assertEquals(401,call("GET","/api/auth/me",null,previous.get("accessToken").asString()).statusCode());assertEquals(401,refresh(previous.get("refreshToken").asString()).statusCode());}
+        assertEquals(200,call("GET","/api/auth/me",null,next.get("accessToken").asString()).statusCode());assertEquals(1,sessionPage(next.get("accessToken").asString()).get("total").asLong());assertEquals(200,refresh(next.get("refreshToken").asString()).statusCode());
+    }
+
+    @Test void changingPasswordPreservesUnicodeAndSpacesAndRevokesEveryDeviceAndLegacyAccess() throws Exception {
+        String username=name(),old=" password123 ",changed=" 新密码"+"密".repeat(28)+" ";register(username,old);var first=pair(username,old);var second=pair(username,old);long id=first.get("user").get("id").asLong();String legacy=jwt.issue(id);
+        assertEquals(200,call("PUT","/api/auth/password",Map.of("currentPassword",old,"newPassword",changed),first.get("accessToken").asString()).statusCode());
+        for(String access:List.of(first.get("accessToken").asString(),second.get("accessToken").asString(),legacy))assertEquals(401,call("GET","/api/auth/me",null,access).statusCode());
+        for(var previous:List.of(first,second))assertEquals(401,refresh(previous.get("refreshToken").asString()).statusCode());
+        assertEquals(401,call("POST","/api/auth/login",Map.of("username",username,"password",old),null).statusCode());
+        assertEquals(401,call("POST","/api/auth/login",Map.of("username",username,"password",changed.strip()),null).statusCode());
+        var next=pair(username,changed);assertEquals(id,next.get("user").get("id").asLong());assertEquals(200,call("GET","/api/auth/me",null,next.get("accessToken").asString()).statusCode());
+    }
+
+    @Test void invalidPasswordChangesLeaveCredentialsAndSessionsUntouched() throws Exception {
+        String username=name();register(username,"password123");var tokens=pair(username,"password123");String access=tokens.get("accessToken").asString();
+        assertEquals(401,call("PUT","/api/auth/password",Map.of("currentPassword","incorrect-password","newPassword","new-password"),access).statusCode());
+        assertEquals(409,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","password123"),access).statusCode());
+        assertEquals(400,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","short"),access).statusCode());
+        assertEquals(400,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","new-password","userId",999),access).statusCode());
+        assertEquals(200,call("GET","/api/auth/me",null,access).statusCode());assertEquals(200,refresh(tokens.get("refreshToken").asString()).statusCode());
+    }
+
+    @Test void logoutWithConsumedRefreshDoesNotTerminateItsReplacementSession() throws Exception {
+        String username=name();register(username,"password123");var first=pair(username,"password123");var response=refresh(first.get("refreshToken").asString());var next=json.readTree(response.body()).get("data");
+        assertEquals(200,call("POST","/api/auth/logout",Map.of("refreshToken",first.get("refreshToken").asString()),null).statusCode());assertEquals(200,call("GET","/api/auth/me",null,next.get("accessToken").asString()).statusCode());
+        assertEquals(200,call("POST","/api/auth/logout",Map.of("refreshToken",next.get("refreshToken").asString()),null).statusCode());assertEquals(401,call("GET","/api/auth/me",null,next.get("accessToken").asString()).statusCode());
+    }
+
+    @Test void legacyRefreshUpgradesToSessionAndGlobalRevocationInvalidatesLegacyAccess() throws Exception {
+        String username=name();register(username,"password123");long id=createdUsers.iterator().next();String legacy=jwt.issue(id),raw="legacy-"+UUID.randomUUID();
+        var row=new com.wordtrail.user.entity.RefreshToken();row.setUserId(id);row.setTokenHash(hash(raw));row.setCreatedAt(LocalDateTime.ofInstant(clock.instant(),ZoneOffset.UTC));row.setExpiresAt(row.getCreatedAt().plusDays(7));refreshTokens.insertSelective(row);
+        assertEquals(200,call("GET","/api/auth/me",null,legacy).statusCode());assertEquals(409,call("POST","/api/auth/logout-others",Map.of("currentPassword","password123"),legacy).statusCode());
+        var refreshed=refresh(raw);assertEquals(200,refreshed.statusCode());var next=json.readTree(refreshed.body()).get("data");assertNotNull(currentSession(next.get("accessToken").asString()));
+        assertEquals(200,call("POST","/api/auth/logout-others",Map.of("currentPassword","password123"),next.get("accessToken").asString()).statusCode());assertEquals(401,call("GET","/api/auth/me",null,legacy).statusCode());
+    }
+
+    @Test void passwordAndLogoutOtherDeviceFailuresRollBackVersionHashesAndRevocations() throws Exception {
+        String username=name();register(username,"password123");var first=pair(username,"password123");var second=pair(username,"password123");String access=first.get("accessToken").asString();
+        authFailure.failAfterMapper="com.wordtrail.user.mapper.AuthSessionMapper";
+        try{assertEquals(500,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","changed-password"),access).statusCode());}finally{authFailure.failAfterMapper=null;}
+        assertEquals(200,call("GET","/api/auth/me",null,access).statusCode());assertEquals(0,users.selectOneById(first.get("user").get("id").asLong()).getAuthVersion());
+        assertEquals(2,sessionPage(access).get("total").asLong());assertTrue(passwords.matches("password123",users.selectOneById(first.get("user").get("id").asLong()).getPasswordHash()));
+        authFailure.failAfterMapper="com.wordtrail.user.mapper.RefreshTokenMapper";
+        try{assertEquals(500,call("POST","/api/auth/logout-others",Map.of("currentPassword","password123"),access).statusCode());}finally{authFailure.failAfterMapper=null;}
+        assertEquals(200,refresh(first.get("refreshToken").asString()).statusCode());assertEquals(200,refresh(second.get("refreshToken").asString()).statusCode());
+    }
+
+    @Test void racingRefreshCannotRestoreADeviceRevokedByLogoutOthers() throws Exception {
+        String username=name();register(username,"password123");var first=pair(username,"password123");var second=pair(username,"password123");
+        try(var pool=Executors.newFixedThreadPool(2)){
+            var refreshTask=pool.submit(()->refresh(second.get("refreshToken").asString()));
+            var revokeTask=pool.submit(()->call("POST","/api/auth/logout-others",Map.of("currentPassword","password123"),first.get("accessToken").asString()));
+            var refreshResponse=refreshTask.get();var revoked=revokeTask.get();assertEquals(200,revoked.statusCode());assertTrue(refreshResponse.statusCode()==200||refreshResponse.statusCode()==401);
+            if(refreshResponse.statusCode()==200)assertEquals(401,call("GET","/api/auth/me",null,json.readTree(refreshResponse.body()).get("data").get("accessToken").asString()).statusCode());
+            String next=json.readTree(revoked.body()).get("data").get("accessToken").asString();assertEquals(1,sessionPage(next).get("total").asLong());
+        }
+    }
+
+    @Test void deviceLabelsAreOptionalBoundedAndNeverReplaceServerAuthorization() throws Exception {
+        String username=name();register(username,"password123");var response=call("POST","/api/auth/login",Map.of("username",username,"password","password123","deviceName","我的浏览器"),null);assertEquals(200,response.statusCode());String access=json.readTree(response.body()).get("data").get("accessToken").asString();
+        assertEquals("我的浏览器",sessionPage(access).get("records").get(0).get("deviceName").asString());
+        assertEquals(400,call("POST","/api/auth/login",Map.of("username",username,"password","password123","deviceName","x".repeat(101)),null).statusCode());
+        assertEquals(400,call("POST","/api/auth/sessions/not-an-id/revoke",null,access).statusCode());
     }
 
     @Test void corsAllowsOnlyConfiguredOriginsAndAuthorizationHeader() throws Exception {

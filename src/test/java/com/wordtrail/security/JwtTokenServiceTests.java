@@ -31,10 +31,22 @@ class JwtTokenServiceTests {
         assertNotEquals(first, service.issue(42));
         String payload = new String(Base64.getUrlDecoder().decode(first.split("\\.")[1]), java.nio.charset.StandardCharsets.UTF_8);
         var claims = new tools.jackson.databind.ObjectMapper().readTree(payload);
-        assertEquals(Set.of("sub", "iss", "iat", "exp", "jti"),
+        assertEquals(Set.of("sub", "iss", "iat", "exp", "jti", "av"),
             new HashSet<>(claims.properties().stream().map(Map.Entry::getKey).toList()));
         assertEquals("42", claims.get("sub").asText());
+        assertEquals(0,claims.get("av").asLong());
         assertEquals(1800, claims.get("exp").asLong() - claims.get("iat").asLong());
+    }
+
+    @Test void sessionIdentityAndLegacyVersionAreParsedExplicitly() {
+        var service=service();String session=UUID.randomUUID().toString().replace("-","");var identity=service.identity(service.issue(42,5,session));
+        assertEquals(42,identity.userId());assertEquals(5,identity.authVersion());assertEquals(session,identity.sessionId());
+        var legacy=service.identity(validBuilder().signWith(new SecretKeySpec(key,"HmacSHA256"),Jwts.SIG.HS256).compact());assertEquals(0,legacy.authVersion());assertNull(legacy.sessionId());
+    }
+    @Test void malformedAuthenticationVersionsAndSessionIdsAreRejected() {
+        var signing=new SecretKeySpec(key,"HmacSHA256");
+        for(Object version:List.of(-1,1.5,"1",true,new java.math.BigInteger("9999999999999999999")))assertThrows(BusinessException.class,()->service().identity(validBuilder().claim("av",version).signWith(signing,Jwts.SIG.HS256).compact()));
+        for(Object session:List.of("not-a-session",42,true))assertThrows(BusinessException.class,()->service().identity(validBuilder().claim("sid",session).signWith(signing,Jwts.SIG.HS256).compact()));
     }
 
     @Test void missingInvalidOrWeakSecretFailsClearly() {

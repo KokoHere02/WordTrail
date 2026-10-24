@@ -13,6 +13,7 @@ public class RefreshToken {
     @Id(keyType = KeyType.Auto)
     private Long id;
     private Long userId;
+    private String sessionId;
     @JsonIgnore
     private String tokenHash;
     private LocalDateTime expiresAt;
