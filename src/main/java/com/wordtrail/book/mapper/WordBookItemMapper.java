@@ -8,6 +8,13 @@ import java.time.LocalDateTime;
 import org.apache.ibatis.annotations.*;
 
 public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
+    record ExportWord(String word,String phonetic,String translation) {}
+    @Select("""
+        SELECT w.word,w.phonetic,w.translation FROM word_book_item bi JOIN word w ON w.id=bi.word_id
+        WHERE bi.book_id=#{bookId} ORDER BY bi.sort_order ASC,bi.id ASC LIMIT #{limit} OFFSET #{offset}
+        """)
+    List<ExportWord> exportWords(@Param("bookId") long bookId,@Param("offset") long offset,@Param("limit") int limit);
+
     record BookProgress(Long bookId, long wordCount, long unlearnedCount, long startedCount, long dueCount) {}
 
     @Select("""

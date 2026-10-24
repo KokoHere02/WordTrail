@@ -9,6 +9,12 @@ import org.springframework.web.ErrorResponse;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    ResponseEntity<ApiResponse<Void>> uploadTooLarge() {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+            .body(ApiResponse.error("IMPORT_TOO_LARGE","导入文件不能超过 256 KiB"));
+    }
+
     @ExceptionHandler({org.springframework.web.method.annotation.HandlerMethodValidationException.class,
         org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class,
         jakarta.validation.ConstraintViolationException.class})

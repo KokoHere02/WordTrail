@@ -8,6 +8,10 @@ spring:
   sql:
     init:
       mode: never
+  servlet:
+    multipart:
+      max-file-size: 256KB
+      max-request-size: 300KB
 
 server:
   port: ${SERVER_PORT:8080}

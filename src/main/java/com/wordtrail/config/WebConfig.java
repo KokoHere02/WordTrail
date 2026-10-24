@@ -38,7 +38,8 @@ public class WebConfig implements WebMvcConfigurer {
     @Override public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/**").allowedOrigins(origins)
             .allowedMethods("GET", "POST", "PUT", "PATCH", "OPTIONS")
-            .allowedHeaders("Authorization", "Content-Type").allowCredentials(false).maxAge(3600);
+            .allowedHeaders("Authorization", "Content-Type").exposedHeaders("Content-Disposition")
+            .allowCredentials(false).maxAge(3600);
     }
 
     @Bean public static Clock authClock() { return Clock.systemUTC(); }
