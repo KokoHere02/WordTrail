@@ -20,6 +20,7 @@ public class LearningBatch {
     private LocalDateTime updatedAt;
     private LocalDateTime completedAt;
     private String taskType;
+    private String practiceMode;
     private LocalDate learningDate;
     private Integer dailyTarget;
 }

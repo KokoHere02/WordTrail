@@ -25,7 +25,7 @@ public interface LearningBatchMapper extends BaseMapper<LearningBatch> {
         ) p ON p.batch_id = b.id
         LEFT JOIN learning_batch_item pending
             ON pending.batch_id = b.id AND pending.sort_order = p.next_sort_order
-        WHERE b.user_id = #{userId} AND b.id IN
+        WHERE b.user_id = #{userId} AND b.practice_mode='RECOGNITION' AND b.id IN
         <foreach collection="batchIds" item="id" open="(" separator="," close=")">#{id}</foreach>
         ORDER BY b.created_at DESC, b.id DESC
         </script>

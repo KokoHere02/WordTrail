@@ -59,7 +59,8 @@ class LearningIntegrationTests {
             if (invocation.getMethod().getName().equals("query")
                     && (statement.startsWith("com.wordtrail.book.mapper.")
                         || statement.startsWith("com.wordtrail.word.mapper.")
-                        || statement.startsWith("com.wordtrail.learning.mapper."))) {
+                        || statement.startsWith("com.wordtrail.learning.mapper.")
+                        || statement.startsWith("com.wordtrail.sentence.mapper."))) {
                 reads.incrementAndGet();
             }
             if (invocation.getMethod().getName().equals("update")) { writes.incrementAndGet(); }
@@ -113,6 +114,7 @@ class LearningIntegrationTests {
     private final PasswordService passwords;
     private final RefreshTokenMapper refreshTokens;
     private final WordReviewLogMapper reviewLogs;
+    @Autowired private DictationMapper dictationLogs;
     private final HttpClient client = HttpClient.newHttpClient();
     private final List<Long> userIds = new ArrayList<>(), bookIds = new ArrayList<>(), wordIds = new ArrayList<>();
     @Autowired private javax.sql.DataSource dataSource;
@@ -163,6 +165,7 @@ class LearningIntegrationTests {
         probe.afterNextStateRead = null;
         probe.afterNextInsightsRead = null;
         if (!userIds.isEmpty()) {
+            dictationLogs.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             learningSettings.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             reviewLogs.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds))
                 .and(column("event_type").eq("CORRECTION")));
@@ -3355,6 +3358,393 @@ class LearningIntegrationTests {
             if(text==null || text.isBlank()) assertEquals(0,groups.size());
             else { assertEquals(text,groups.get(0).get("meaning").asText()); assertTrue(groups.get(0).get("partOfSpeech").isNull()); }
         }
+    }
+
+    private JsonNode importPreview(long book,String text,String format) throws Exception {
+        var response=call("POST","/api/word-books/"+book+"/import/preview",Map.of("text",text,"format",format),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return json.readTree(response.body()).get("data");
+    }
+    private HttpResponse<String> importFile(long book,String name,byte[] bytes,String token) throws Exception {
+        String boundary="WordTrail"+UUID.randomUUID().toString().replace("-","");
+        var body=new java.io.ByteArrayOutputStream();
+        body.writeBytes(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+name+"\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        body.writeBytes(bytes); body.writeBytes(("\r\n--"+boundary+"--\r\n").getBytes(StandardCharsets.UTF_8));
+        var request=HttpRequest.newBuilder(URI.create("http://localhost:"+environment.getRequiredProperty("local.server.port")+"/api/word-books/"+book+"/import/preview"))
+            .header("Content-Type","multipart/form-data; boundary="+boundary).POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray()));
+        if(token!=null) request.header("Authorization","Bearer "+token);
+        return client.send(request.build(),HttpResponse.BodyHandlers.ofString());
+    }
+    private String spelling(int index) { return words.selectOneById(wordIds.get(index)).getWord(); }
+
+    @Test void bookImportPreviewSeparatesMatchesExistingMembershipDuplicatesMissingAndAmbiguity() throws Exception {
+        word(spelling(1)); String text=spelling(2)+"\n"+spelling(0)+"\n"+spelling(0)+"\n"+prefix+"missing\n"+spelling(1)+"\n"+"x".repeat(256);
+        int writes=probe.writes.get(); var preview=importPreview(ownBook,text,"TXT");
+        assertEquals(6,preview.get("totalCount").asInt());
+        for(String field:List.of("matchedCount","alreadyInBookCount","duplicateCount","notFoundCount","ambiguousCount","invalidCount"))
+            assertEquals(1,preview.get(field).asInt(),field);
+        assertEquals(List.of(wordIds.get(2),wordIds.get(0)),java.util.stream.StreamSupport.stream(preview.get("readyWordIds").spliterator(),false).map(JsonNode::asLong).toList());
+        var rows=preview.get("records"); assertEquals("ALREADY_IN_BOOK",rows.get(0).get("status").asText());
+        assertEquals(2,rows.get(2).get("duplicateOfRow").asInt()); assertEquals(2,rows.get(4).get("candidateCount").asInt());
+        assertEquals(2,rows.get(4).get("candidates").size()); assertFalse(rows.get(4).get("hasMoreCandidates").asBoolean());
+        assertTrue(rows.get(0).get("candidates").get(0).get("inBook").asBoolean());
+        assertEquals(writes,probe.writes.get());
+    }
+
+    @Test void bookImportMatchesLiteralSpellingAndCaseAndReturnsBoundedAmbiguousCandidates() throws Exception {
+        long capital=word(prefix+"Apple"),phrase=word(prefix+" take off");
+        String text=spelling(3)+"\n"+spelling(4)+"\n"+spelling(5)+"\n"+spelling(6)+"\n"+prefix+"Apple\n"+prefix+" take off\n"+prefix+"' OR 1=1 --";
+        var rows=importPreview(emptyBook,text,"TXT").get("records");
+        assertEquals(7,rows.size()); for(int i=0;i<6;i++) assertEquals("MATCHED",rows.get(i).get("status").asText());
+        assertEquals(capital,rows.get(4).get("candidates").get(0).get("id").asLong());
+        assertEquals(phrase,rows.get(5).get("candidates").get(0).get("id").asLong());
+        assertEquals("NOT_FOUND",rows.get(6).get("status").asText());
+        for(int i=0;i<25;i++) word(spelling(1));
+        var ambiguous=importPreview(emptyBook,spelling(1),"TXT").get("records").get(0);
+        assertEquals(26,ambiguous.get("candidateCount").asInt()); assertEquals(20,ambiguous.get("candidates").size());
+        assertTrue(ambiguous.get("hasMoreCandidates").asBoolean());
+        assertEquals(26,get("/api/words?keyword="+encoded(spelling(1))+"&matchType=EXACT",tokenA).get("total").asInt());
+    }
+
+    @Test void bookImportPreviewUploadsUtf8TxtAndCsvWithoutTreatingExtraColumnsAsDictionaryUpdates() throws Exception {
+        String text="\uFEFFtranslation,word,phonetic\r\n\"line1\r\nline2, \"\"quoted\"\"\","+spelling(1)+",/override/\r\n";
+        var uploaded=importFile(emptyBook,"words.CSV",text.getBytes(StandardCharsets.UTF_8),tokenA);
+        assertEquals(200,uploaded.statusCode(),uploaded.body()); var data=json.readTree(uploaded.body()).get("data");
+        assertEquals(1,data.get("matchedCount").asInt()); assertEquals(2,data.get("records").get(0).get("rowNumber").asInt());
+        assertEquals(json.readTree("[\"translation\",\"phonetic\"]"),data.get("ignoredColumns"));
+        var txt=importFile(emptyBook,"words.txt",("\uFEFF"+spelling(2)+"\n\n"+spelling(1)).getBytes(StandardCharsets.UTF_8),tokenA);
+        assertEquals(200,txt.statusCode()); assertEquals(2,json.readTree(txt.body()).get("data").get("matchedCount").asInt());
+        assertEquals("测试",words.selectOneById(wordIds.get(1)).getTranslation()); assertEquals("/test/",words.selectOneById(wordIds.get(1)).getPhonetic());
+    }
+
+    @Test void bookImportFileAndJsonValidateLimitsEncodingFormatAndUnknownFields() throws Exception {
+        for(String name:List.of("words.exe","words.csv.exe","words")) assertEquals(400,importFile(emptyBook,name,new byte[]{1},tokenA).statusCode());
+        assertEquals(400,importFile(emptyBook,"words.txt",new byte[]{(byte)0xff},tokenA).statusCode());
+        assertEquals(400,importFile(emptyBook,"words.txt",new byte[0],tokenA).statusCode());
+        var tooLarge=importFile(emptyBook,"words.txt",new byte[262145],tokenA);
+        assertEquals(413,tooLarge.statusCode(),tooLarge.body()); assertEquals("IMPORT_TOO_LARGE",json.readTree(tooLarge.body()).get("code").asText());
+        for(Object request:List.of(Map.of("text"," "),Map.of("text",spelling(1),"format","XLSX"),Map.of("text",spelling(1),"user_id",b),
+                Map.of("text",spelling(1)+"\n".repeat(2)+spelling(2),"ownerId",b)))
+            assertEquals(400,call("POST","/api/word-books/"+emptyBook+"/import/preview",request,tokenA).statusCode());
+        var defaultFormat=call("POST","/api/word-books/"+emptyBook+"/import/preview",Map.of("text",spelling(1)),tokenA);
+        assertEquals("TXT",json.readTree(defaultFormat.body()).get("data").get("format").asText());
+        assertEquals(400,call("POST","/api/word-books/"+emptyBook+"/import/preview",Map.of("text",(spelling(1)+"\n").repeat(101)),tokenA).statusCode());
+        assertEquals(413,call("POST","/api/word-books/"+emptyBook+"/import/preview",Map.of("text","汉".repeat(100000)),tokenA).statusCode());
+    }
+
+    @Test void bookImportAndExportOnlyAllowOwnedPersonalBooksAndKeepErrorsIndistinguishable() throws Exception {
+        for(long book:List.of(otherBook,Long.MAX_VALUE,systemBook)) {
+            int status=book==systemBook?403:404;
+            assertEquals(status,call("POST","/api/word-books/"+book+"/import/preview",Map.of("text",spelling(1)),tokenA).statusCode());
+            assertEquals(status,importFile(book,"words.txt",spelling(1).getBytes(StandardCharsets.UTF_8),tokenA).statusCode());
+            assertEquals(status,call("GET","/api/word-books/"+book+"/export",null,tokenA).statusCode());
+        }
+        assertEquals(401,importFile(emptyBook,"words.txt",new byte[]{1},null).statusCode());
+        assertEquals(401,call("GET","/api/word-books/"+emptyBook+"/export",null,null).statusCode());
+        assertEquals(404,call("GET","/api/word-books/"+emptyBook+"/export?user_id="+a,null,tokenB).statusCode());
+        assertEquals(call("GET","/api/word-books/"+otherBook+"/export",null,tokenA).body(),call("GET","/api/word-books/"+Long.MAX_VALUE+"/export",null,tokenA).body());
+    }
+
+    @Test void bookImportConfirmationReusesCollectionAndLeavesPlansDailyPracticeAndHistoryUnchanged() throws Exception {
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); dailyAnswer(daily,itemId(daily),2,1);
+        long practice=manualBatch(wordIds.get(2)); answer(practice,itemId(practice),3);
+        String memory=stateSnapshot(),queue=batchSnapshot(daily),exercise=batchSnapshot(practice); long logs=logCount(daily)+logCount(practice);
+        var preview=importPreview(emptyBook,spelling(1)+"\n"+spelling(2)+"\n"+spelling(1),"TXT");
+        var request=Map.of("wordIds",preview.get("readyWordIds"));
+        var first=call("POST",wordsPath(emptyBook),request,tokenA); assertEquals(200,first.statusCode());
+        assertEquals(2,json.readTree(first.body()).get("data").get("changedCount").asInt());
+        var second=call("POST",wordsPath(emptyBook),request,tokenA);
+        assertEquals(0,json.readTree(second.body()).get("data").get("changedCount").asInt());
+        assertEquals(2,importPreview(emptyBook,spelling(1)+"\n"+spelling(2),"TXT").get("alreadyInBookCount").asInt());
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(daily)); assertEquals(exercise,batchSnapshot(practice));
+        assertEquals(logs,logCount(daily)+logCount(practice)); assertNull(state(a,wordIds.get(2)));
+    }
+
+    @Test void bookImportConfirmationRechecksEveryWordAndRollsBackMembershipAndMetadata() throws Exception {
+        var preview=importPreview(emptyBook,spelling(1),"TXT"); assertEquals(1,preview.get("readyWordIds").size());
+        String before=personalBookSnapshot(emptyBook); var metadata=json.valueToTree(books.selectOneById(emptyBook));
+        assertEquals(404,call("POST",wordsPath(emptyBook),Map.of("wordIds",List.of(wordIds.get(1),Long.MAX_VALUE)),tokenA).statusCode());
+        probe.failAfterMapper="com.wordtrail.book.mapper.WordBookMapper";
+        try { assertEquals(500,call("POST",wordsPath(emptyBook),Map.of("wordIds",preview.get("readyWordIds")),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; }
+        assertEquals(before,personalBookSnapshot(emptyBook)); assertEquals(metadata,json.valueToTree(books.selectOneById(emptyBook)));
+        var changed=books.selectOneById(emptyBook); changed.setOwnerId(b); books.update(changed);
+        assertEquals(404,call("POST",wordsPath(emptyBook),Map.of("wordIds",preview.get("readyWordIds")),tokenA).statusCode());
+    }
+
+    @Test void bookExportPreservesOrderQuotesNewlinesAndCanBePreviewedAgain() throws Exception {
+        personalBookWords("POST",emptyBook,wordIds.get(2),wordIds.get(1));
+        dictionaryTranslation(wordIds.get(2),"n. 苹果,\"quoted\"\r\n[计] line2\\n原文");
+        var response=call("GET","/api/word-books/"+emptyBook+"/export",null,tokenA);
+        assertEquals(200,response.statusCode()); assertEquals("text/csv;charset=UTF-8",response.headers().firstValue("Content-Type").orElseThrow());
+        assertTrue(response.headers().firstValue("Content-Disposition").orElseThrow().contains("wordtrail-book-"+emptyBook+".csv"));
+        assertEquals("no-store",response.headers().firstValue("Cache-Control").orElseThrow());
+        assertTrue(response.body().startsWith("\uFEFFword,phonetic,translation\r\n"));
+        assertTrue(response.body().contains("n. 苹果,\"\"quoted\"\"\r\n[计] line2\\n原文"));
+        assertTrue(response.body().indexOf(spelling(2))<response.body().indexOf(spelling(1)));
+        var preview=importPreview(emptyBook,response.body(),"CSV"); assertEquals(2,preview.get("alreadyInBookCount").asInt());
+        assertEquals(2,preview.get("readyWordIds").size());
+    }
+
+    @Test void bookExportSpreadsheetProtectionRoundTripsFormulaWordsAndApostrophes() throws Exception {
+        var ids=new ArrayList<Long>();
+        for(String text:List.of("=SUM(1,1)","-word","@word","'tis","'=literal")) ids.add(word(text+prefix));
+        personalBookWords("POST",emptyBook,ids.toArray(Long[]::new)); dictionaryTranslation(ids.get(0),"=CMD()");
+        var exported=getExport(emptyBook); assertTrue(exported.contains("\"'=CMD()\""));
+        var preview=importPreview(emptyBook,exported,"CSV"); assertEquals(5,preview.get("alreadyInBookCount").asInt());
+        assertEquals(0,preview.get("notFoundCount").asInt()); assertEquals(0,preview.get("ambiguousCount").asInt());
+        assertEquals("=CMD()",words.selectOneById(ids.get(0)).getTranslation());
+    }
+    private String getExport(long book) throws Exception {
+        var response=call("GET","/api/word-books/"+book+"/export",null,tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return response.body();
+    }
+
+    @Test void bookTransferPreviewAndExportDoNotWriteAndPreviewQueriesDoNotGrowPerWord() throws Exception {
+        String before=personalBookSnapshot(ownBook),memory=stateSnapshot(); int writes=probe.writes.get();
+        String term=spelling(1),many=term+"\n"+spelling(2)+"\n"+spelling(3);
+        probe.reads.set(0); importPreview(ownBook,term,"TXT"); int one=probe.reads.get();
+        probe.reads.set(0); importPreview(ownBook,many,"TXT");
+        assertEquals(one,probe.reads.get()); assertEquals(2,one);
+        assertEquals("\uFEFFword,phonetic,translation\r\n",getExport(emptyBook)); getExport(ownBook);
+        assertEquals(writes,probe.writes.get()); assertEquals(before,personalBookSnapshot(ownBook)); assertEquals(memory,stateSnapshot());
+    }
+
+    @Test void bookExportPaginationReturnsAllWordsAndExposesDownloadFilenameThroughCors() throws Exception {
+        var extras=new ArrayList<Long>(); for(int i=0;i<205;i++) {long word=word(prefix+"_export_"+i); extras.add(word); associate(emptyBook,word,i+1);}
+        var exported=getExport(emptyBook); assertEquals(205,importCsvDataRows(exported));
+        assertTrue(exported.contains(prefix+"_export_204"));
+        var request=HttpRequest.newBuilder(URI.create("http://localhost:"+environment.getRequiredProperty("local.server.port")+"/api/word-books/"+emptyBook+"/export"))
+            .header("Authorization","Bearer "+tokenA).header("Origin","http://localhost:5173").GET().build();
+        var response=client.send(request,HttpResponse.BodyHandlers.ofString()); assertEquals(200,response.statusCode());
+        assertTrue(response.headers().firstValue("Access-Control-Expose-Headers").orElseThrow().contains("Content-Disposition"));
+        assertEquals(400,call("POST","/api/word-books/"+emptyBook+"/import/preview",Map.of("text",exported,"format","CSV"),tokenA).statusCode());
+    }
+    private int importCsvDataRows(String csv) { return csv.split("\r\n").length-1; }
+
+    @Test void bookImportAmbiguousWordsRequireChoosingAnIdEvenWhenOneCandidateIsAlreadyCollected() throws Exception {
+        long duplicate=word(spelling(1)); personalBookWords("POST",emptyBook,wordIds.get(1));
+        var row=importPreview(emptyBook,spelling(1),"TXT"); assertEquals(1,row.get("ambiguousCount").asInt());
+        assertEquals(0,row.get("readyWordIds").size());
+        var result=personalBookWords("POST",emptyBook,duplicate);
+        assertEquals(1,result.get("changedCount").asInt()); assertEquals(2,get("/api/word-books/"+emptyBook,tokenA).get("wordCount").asInt());
+        assertNull(state(a,duplicate));
+    }
+
+    private void seedExportLimitBook(int count,String translation) {
+        var entries=new ArrayList<Word>();
+        for(int i=0;i<count;i++) {var word=new Word(); word.setWord(prefix+"_transfer_limit_"+i); word.setTranslation(translation); word.setCreatedAt(LocalDateTime.now()); word.setUpdatedAt(word.getCreatedAt()); entries.add(word);}
+        for(int i=0;i<entries.size();i+=50) words.insertBatch(entries.subList(i,Math.min(i+50,entries.size())));
+        var created=words.selectListByQuery(QueryWrapper.create().where(column("word").like(prefix+"_transfer_limit_")));
+        assertEquals(count,created.size()); var associations=new ArrayList<WordBookItem>(); int order=0;
+        for(var word:created) {wordIds.add(word.getId()); var entry=new WordBookItem(); entry.setBookId(emptyBook); entry.setWordId(word.getId()); entry.setSortOrder(++order); entry.setCreatedAt(LocalDateTime.now()); associations.add(entry);}
+        bookItems.insertBatch(associations);
+    }
+
+    @Test void bookExportOverWordLimitReturnsJsonErrorInsteadOfTruncatingTheFile() throws Exception {
+        seedExportLimitBook(10001,"limit fixture");
+        var response=call("GET","/api/word-books/"+emptyBook+"/export",null,tokenA);
+        assertEquals(413,response.statusCode(),response.body()); assertEquals("BOOK_EXPORT_TOO_LARGE",json.readTree(response.body()).get("code").asText());
+        assertFalse(response.headers().firstValue("Content-Disposition").isPresent());
+        assertEquals(10001,bookItems.selectCountByQuery(QueryWrapper.create().where(column("book_id").eq(emptyBook))));
+    }
+
+    @Test void bookExportOverByteLimitReturnsJsonErrorAndPreservesSourceWords() throws Exception {
+        seedExportLimitBook(170,"x".repeat(64000));
+        var response=call("GET","/api/word-books/"+emptyBook+"/export",null,tokenA);
+        assertEquals(413,response.statusCode(),response.body()); assertEquals("BOOK_EXPORT_TOO_LARGE",json.readTree(response.body()).get("code").asText());
+        assertFalse(response.headers().firstValue("Content-Disposition").isPresent());
+        assertEquals(64000,words.selectOneById(wordIds.getLast()).getTranslation().length());
+    }
+
+    private String dictationPath(long batch) { return "/api/dictation/batches/"+batch; }
+    private JsonNode createDictation(Object request) throws Exception {
+        var response=call("POST","/api/dictation/batches",request,tokenA);
+        assertEquals(201,response.statusCode(),response.body()); return json.readTree(response.body()).get("data");
+    }
+    private JsonNode dictationNext(long batch) throws Exception {
+        var response=call("POST",dictationPath(batch)+"/next",null,tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return json.readTree(response.body()).get("data");
+    }
+    private Map<String,Object> dictationBody(JsonNode question,String input,String request) {
+        var body=new LinkedHashMap<String,Object>(); body.put("action",input==null?"REVEAL":"ANSWER");
+        if(input!=null) body.put("input",input);
+        body.put("attemptNo",question.get("nextAttemptNo").asInt()); body.put("presentationId",question.get("presentationId").asText()); body.put("requestId",request); return body;
+    }
+    private JsonNode dictate(long batch,JsonNode question,String input,String key) throws Exception {
+        var response=call("PUT",dictationPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer",dictationBody(question,input,key),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return json.readTree(response.body()).get("data");
+    }
+    private JsonNode dictate(long batch,String input) throws Exception {return dictate(batch,dictationNext(batch),input,requestId());}
+
+    @Test void dictationDefaultSelectionRequiresActiveStartedPlansAndKeepsWordIdentityAcrossBooks() throws Exception {
+        joinPlan(wordIds.get(1));
+        long batch=createDictation(Map.of("count",100)).get("batchId").asLong();
+        assertEquals(List.of(wordIds.get(0)),batchDetails(batch).stream().map(LearningBatchItem::getWordId).toList());
+        assertEquals("DICTATION",batches.selectOneById(batch).getPracticeMode()); assertNull(batchDetails(batch).get(0).getResult());
+        assertEquals(409,call("POST","/api/dictation/batches",Map.of("wordIds",List.of(wordIds.get(1))),tokenA).statusCode());
+        personalBookWords("POST",emptyBook,wordIds.get(0));
+        long second=createDictation(Map.of("bookId",emptyBook,"wordIds",List.of(wordIds.get(0),wordIds.get(0)))).get("batchId").asLong();
+        assertEquals(1,batchDetails(second).size());
+        planManagementStatus("PAUSED",wordIds.get(0));
+        assertEquals(409,call("POST","/api/dictation/batches",Map.of(),tokenA).statusCode());
+        assertEquals("IN_PROGRESS",get(dictationPath(batch),tokenA).get("status").asText());
+    }
+
+    @Test void dictationQuestionMasksTargetAndDoesNotRevealEnglishOrPhoneticUntilSubmitting() throws Exception {
+        long word=wordIds.get(0); dictionaryTranslation(word,"n. "+spelling(0)+"的用法及中文释义");
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var question=dictationNext(batch);
+        assertFalse(question.toString().contains(spelling(0))); assertFalse(question.has("word")); assertFalse(question.has("phonetic"));
+        assertTrue(question.get("prompt").asText().contains("[目标词]"));
+        assertEquals(question,dictationNext(batch)); assertEquals(0,dictationLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))));
+        var result=dictate(batch,question,spelling(0).toUpperCase(Locale.ROOT),requestId());
+        assertEquals("CORRECT",result.get("verdict").asText()); assertEquals(spelling(0),result.get("expectedWord").asText());
+        assertTrue(result.get("translationGroups").isArray()); assertFalse(result.get("affectsSchedule").asBoolean());
+        assertEquals("COMPLETED",result.get("progress").get("status").asText());
+        assertEquals(1,result.get("progress").get("passedCount").asInt());
+    }
+
+    @Test void dictationWrongAndRevealedWordsRequireTwoConsecutiveCorrectAnswers() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong();
+        var wrong=dictate(batch,"misspelling"); assertEquals("RELEARNING",wrong.get("itemStatus").asText());
+        var first=dictate(batch,spelling(0)); assertEquals(1,first.get("correctStreak").asInt()); assertEquals("RELEARNING",first.get("itemStatus").asText());
+        var reveal=dictate(batch,null); assertEquals("REVEALED",reveal.get("verdict").asText()); assertEquals(0,reveal.get("correctStreak").asInt());
+        assertEquals("RELEARNING",dictate(batch,spelling(0)).get("itemStatus").asText());
+        var passed=dictate(batch,spelling(0)); assertEquals("DONE",passed.get("itemStatus").asText());
+        assertEquals(5,passed.get("progress").get("attemptCount").asInt()); assertEquals("RECALLED",passed.get("completionReason").asText());
+        assertEquals(0,get("/api/dictation/mistakes",tokenA).get("total").asInt());
+    }
+
+    @Test void dictationQueuesBehindThreeOtherWordsAndRefreshUsesSameCurrentPresentation() throws Exception {
+        for(int i=1;i<5;i++) learn(a,wordIds.get(i),1);
+        long batch=createDictation(Map.of("wordIds",wordIds.subList(0,5))).get("batchId").asLong(); var entries=batchDetails(batch);
+        var original=dictationNext(batch); dictate(batch,original,null,requestId());
+        for(int i=1;i<=3;i++) {
+            var next=dictationNext(batch); assertEquals(entries.get(i).getId().longValue(),next.get("itemId").asLong());
+            dictate(batch,next,spelling(i),requestId());
+        }
+        var repeated=dictationNext(batch); assertEquals(entries.get(0).getId().longValue(),repeated.get("itemId").asLong());
+        assertNotEquals(original.get("presentationId"),repeated.get("presentationId"));
+        assertEquals(repeated,dictationNext(batch));
+    }
+
+    @Test void dictationRequiresNewQuestionAndRejectsOldPageReplaysAndOutOfOrderItems() throws Exception {
+        learn(a,wordIds.get(1),1);
+        long batch=createDictation(Map.of("wordIds",wordIds.subList(0,2))).get("batchId").asLong();
+        var question=dictationNext(batch); var body=dictationBody(question,null,requestId());
+        long other=batchDetails(batch).get(1).getId();
+        assertEquals(409,call("PUT",dictationPath(batch)+"/items/"+other+"/answer",body,tokenA).statusCode());
+        dictate(batch,question,null,requestId());
+        assertEquals(409,call("PUT",dictationPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer",dictationBody(question,spelling(0),requestId()),tokenA).statusCode());
+        assertEquals(1,dictationLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))));
+    }
+
+    @Test void dictationAttemptLimitEndsWithoutClaimingPassAndMistakesFollowRealEvents() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong();
+        for(int i=0;i<5;i++) dictate(batch,null);
+        var last=dictate(batch,spelling(0)); assertEquals("CORRECT",last.get("verdict").asText());
+        assertEquals("LIMIT_REACHED",last.get("completionReason").asText());
+        assertEquals(0,last.get("progress").get("passedCount").asInt()); assertEquals(1,last.get("progress").get("needsPracticeCount").asInt());
+        assertEquals(1,get("/api/dictation/mistakes",tokenA).get("total").asInt());
+        planManagementStatus("REMOVED",wordIds.get(0)); String memory=stateSnapshot();
+        long retry=createDictation(Map.of("source","MISTAKES")).get("batchId").asLong();
+        assertEquals(memory,stateSnapshot()); dictate(retry,spelling(0));
+        assertEquals(1,get("/api/dictation/mistakes",tokenA).get("total").asInt());
+        dictate(retry,spelling(0));
+        assertEquals(0,get("/api/dictation/mistakes",tokenA).get("total").asInt());
+        assertEquals("REMOVED",state(a,wordIds.get(0)).getPlanStatus());
+    }
+
+    @Test void dictationSubmissionRetryAndConcurrentRequestsOnlyRecordOneAttempt() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var question=dictationNext(batch); var key=requestId();
+        var body=dictationBody(question,"bad",key); var gate=new CountDownLatch(1);
+        String path=dictationPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer";
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var one=pool.submit(()->{gate.await();return call("PUT",path,body,tokenA);});
+            var two=pool.submit(()->{gate.await();return call("PUT",path,body,tokenA);}); gate.countDown();
+            var first=one.get(15,TimeUnit.SECONDS); var second=two.get(15,TimeUnit.SECONDS);
+            assertEquals(200,first.statusCode(),first.body()); assertEquals(200,second.statusCode(),second.body());
+            assertEquals(json.readTree(first.body()).get("data"),json.readTree(second.body()).get("data"));
+        }
+        assertEquals(1,get(dictationPath(batch),tokenA).get("attemptCount").asInt());
+        assertEquals(409,call("PUT",path,dictationBody(question,spelling(0),key),tokenA).statusCode());
+        assertEquals(1,dictationLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))));
+    }
+
+    @Test void dictationUsesSnapshotsAndContinuesAcrossDaysWithoutMovingDailySchedules() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var question=dictationNext(batch); String original=spelling(0),memory=stateSnapshot();
+        var word=words.selectOneById(wordIds.get(0)); word.setWord(prefix+"changed"); word.setTranslation("修改后的释义"); words.update(word);
+        advanceDays(2); var answer=dictate(batch,question,original,requestId());
+        assertEquals("CORRECT",answer.get("verdict").asText()); assertEquals(original,answer.get("expectedWord").asText());
+        assertEquals("测试",answer.get("translation").asText()); assertEquals(memory,stateSnapshot());
+        var history=get("/api/dictation/words/"+wordIds.get(0)+"/history",tokenA).get("records").get(0);
+        assertEquals(statisticsDate().toString(),history.get("learningDate").asText());
+    }
+
+    @Test void dictationIsExcludedFromRecognitionListsWeakWordsHistoriesAndAllOldStatistics() throws Exception {
+        var practiceBefore=insightSummary("PRACTICE"); var dailyBefore=insightSummary("DAILY");
+        var weakBefore=weakWords("PRACTICE"); var historyBefore=get("/api/learning-plan/words/"+wordIds.get(0)+"/history",tokenA);
+        String memory=stateSnapshot(); long recognitionEvents=reviewLogs.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(a)));
+        long batch=createDictation(Map.of()).get("batchId").asLong(); dictate(batch,null);
+        assertEquals(0,get("/api/learning-batches",tokenA).get("total").asInt());
+        assertEquals(practiceBefore,insightSummary("PRACTICE")); assertEquals(dailyBefore,insightSummary("DAILY"));
+        assertEquals(weakBefore,weakWords("PRACTICE")); assertEquals(historyBefore,get("/api/learning-plan/words/"+wordIds.get(0)+"/history",tokenA));
+        assertEquals(memory,stateSnapshot());
+        assertEquals(recognitionEvents,reviewLogs.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(a))));
+        for(String suffix:List.of("","/items/"+itemId(batch),"/result","/result/words")) {
+            var response=call("GET",batchPath(batch)+suffix,null,tokenA); assertEquals(409,response.statusCode());
+            assertEquals("DICTATION_ENDPOINT_REQUIRED",json.readTree(response.body()).get("code").asText());
+        }
+    }
+
+    @Test void dictationRejectsOtherUsersAndWrongPracticeTypesAndUnqualifiedManualSelections() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var question=dictationNext(batch);
+        for(String suffix:List.of("","/result/words")) assertEquals(404,call("GET",dictationPath(batch)+suffix,null,tokenB).statusCode());
+        assertEquals(404,call("POST",dictationPath(batch)+"/next",null,tokenB).statusCode());
+        assertEquals(404,call("PUT",dictationPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer",dictationBody(question,null,requestId()),tokenB).statusCode());
+        assertEquals(401,call("POST","/api/dictation/batches",Map.of(),null).statusCode());
+        assertEquals(0,get("/api/dictation/words/"+wordIds.get(0)+"/history",tokenB).get("total").asInt());
+        long practice=manualBatch(wordIds.get(1)); assertEquals(409,call("POST",dictationPath(practice)+"/next",null,tokenA).statusCode());
+        assertEquals(404,call("POST","/api/dictation/batches",Map.of("bookId",otherBook),tokenA).statusCode());
+        assertEquals(409,call("POST","/api/dictation/batches",Map.of("wordIds",List.of(wordIds.get(0),wordIds.get(1))),tokenA).statusCode());
+    }
+
+    @Test void dictationValidatesClientInputAndDoesNotAcceptForgedVerdictsOrTargets() throws Exception {
+        for(Object request:List.of(Map.of("count",0),Map.of("count",101),Map.of("source","ALL"),Map.of("user_id",b),Map.of("wordIds",List.of(0)),Map.of("wordIds",List.of())))
+            assertTrue(Set.of(400,409).contains(call("POST","/api/dictation/batches",request,tokenA).statusCode()));
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var q=dictationNext(batch);
+        for(var field:Map.of("result",1,"expectedWord","fake","user_id",b).entrySet()) {
+            var body=new LinkedHashMap<>(dictationBody(q,spelling(0),requestId())); body.put(field.getKey(),field.getValue());
+            assertEquals(400,call("PUT",dictationPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",body,tokenA).statusCode());
+        }
+        assertEquals(0,get(dictationPath(batch),tokenA).get("attemptCount").asInt());
+    }
+
+    @Test void dictationTransactionsRollBackCreationQueueAndEventsTogether() throws Exception {
+        long before=countBatches(); probe.failAfterMapper="com.wordtrail.learning.mapper.LearningBatchItemMapper";
+        try {assertEquals(500,call("POST","/api/dictation/batches",Map.of(),tokenA).statusCode());}
+        finally {probe.failAfterMapper=null;} assertEquals(before,countBatches());
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var q=dictationNext(batch); String state=batchSnapshot(batch);
+        for(String mapper:List.of("LearningBatchItemMapper","DictationMapper","LearningBatchMapper")) {
+            probe.failAfterMapper="com.wordtrail.learning.mapper."+mapper;
+            try {assertEquals(500,call("PUT",dictationPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",dictationBody(q,null,requestId()),tokenA).statusCode());}
+            finally {probe.failAfterMapper=null;}
+            assertEquals(state,batchSnapshot(batch)); assertEquals(0,dictationLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))));
+        }
+    }
+
+    @Test void dictationHistoryMistakesAndResultsArePagedWithoutFabricatingOldAttempts() throws Exception {
+        assertEquals(0,get("/api/dictation/words/"+wordIds.get(0)+"/history",tokenA).get("total").asInt());
+        long batch=createDictation(Map.of()).get("batchId").asLong(); dictate(batch,null); dictate(batch,spelling(0));
+        assertEquals(1,get("/api/dictation/mistakes",tokenA).get("total").asInt());
+        dictate(batch,spelling(0)); var result=get(dictationPath(batch)+"/result/words",tokenA);
+        assertEquals(1,result.get("total").asInt()); assertEquals(3,result.get("records").get(0).get("attemptCount").asInt());
+        var history=get("/api/dictation/words/"+wordIds.get(0)+"/history?size=1",tokenA);
+        assertEquals(3,history.get("total").asInt()); assertEquals(3,history.get("records").get(0).get("attemptNo").asInt());
+        assertEquals("DICTATION",history.get("records").get(0).get("practiceMode").asText());
+        assertFalse(history.get("records").get(0).get("affectsSchedule").asBoolean());
+        assertEquals(1,get("/api/dictation/batches?status=COMPLETED",tokenA).get("total").asInt());
+        assertEquals(0,get("/api/dictation/mistakes",tokenA).get("total").asInt());
+        assertEquals(0,get("/api/dictation/words/"+wordIds.get(0)+"/history?page=2147483647",tokenA).get("records").size());
     }
 
     private void rollbackAfterWrite(String mapper) throws Exception {

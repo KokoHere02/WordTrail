@@ -14,7 +14,7 @@ public interface LearningStatisticsMapper extends BaseMapper<LearningBatchItem> 
     // The item is the transactionally maintained effective feedback, including corrections.
     // Compare it with the latest answer/correction for completeness; never infer missing attempts.
     String DATE_SCOPE = """
-        b.user_id = #{userId} AND b.task_type = 'DAILY'
+        b.user_id = #{userId} AND b.task_type = 'DAILY' AND b.practice_mode='RECOGNITION'
         AND b.learning_date >= #{from} AND b.learning_date <= #{to}
         """;
     String EVENTS_FROM = """

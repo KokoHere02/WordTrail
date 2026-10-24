@@ -42,6 +42,7 @@ public class LearningService {
         var query = QueryWrapper.create().where(column("user_id").eq(userId))
             .and(column("status").eq(request.getStatus().name()))
             .and(column("task_type").eq("PRACTICE"))
+            .and(column("practice_mode").eq("RECOGNITION"))
             .orderBy(column("created_at").desc(), column("id").desc());
         var page = batches.paginate(request.getPage(), request.getSize(), query);
         var ids = page.getRecords().stream().map(LearningBatch::getId).toList();
@@ -195,6 +196,9 @@ public class LearningService {
 
     private LearningBatch ownedBatch(long batchId, long userId, boolean lock) {
         var batch = context.ownedBatch(userId, batchId, lock);
+        if("DICTATION".equals(batch.getPracticeMode())) {
+            throw conflict("DICTATION_ENDPOINT_REQUIRED", "默写批次请使用 /api/dictation 接口");
+        }
         if ("DAILY".equals(batch.getTaskType())) {
             throw conflict("DAILY_ENDPOINT_REQUIRED", "每日任务请使用 /daily 接口，完成状态不能通过 result 判定");
         }

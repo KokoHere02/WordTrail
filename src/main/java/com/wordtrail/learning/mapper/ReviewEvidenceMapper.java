@@ -16,7 +16,7 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
     // Inline derived tables keep each parameter occurrence explicitly bound on MySQL and H2.
     String ITEMS = """
         SELECT i.* FROM learning_batch b JOIN learning_batch_item i ON i.batch_id=b.id
-        WHERE b.user_id=#{userId} AND b.task_type=#{source}
+        WHERE b.user_id=#{userId} AND b.task_type=#{source} AND b.practice_mode='RECOGNITION'
         <if test="batchId != null">AND b.id=#{batchId}</if>
         """;
     String ANSWERS = """
@@ -27,7 +27,7 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
                  ORDER BY c.id DESC LIMIT 1),a.result) AS effective_result
         FROM word_review_log a JOIN learning_batch b ON b.id=a.batch_id AND b.user_id=a.user_id
         JOIN learning_batch_item i ON i.id=a.batch_item_id AND i.batch_id=b.id AND i.word_id=a.word_id
-        WHERE a.user_id=#{userId} AND b.task_type=#{source} AND a.event_type='ANSWER'
+        WHERE a.user_id=#{userId} AND b.task_type=#{source} AND b.practice_mode='RECOGNITION' AND a.event_type='ANSWER'
         <if test="batchId != null">AND b.id=#{batchId}</if>
         """;
     String RANKED = """

@@ -26,4 +26,9 @@ public class LearningBatchItem {
     private LocalDateTime skippedAt;
     private Integer reinforcementRemaining;
     private String completionReason;
+    private String dictationTarget;
+    private String dictationTranslation;
+    private Boolean dictationHadFailure;
+    private Integer dictationCorrectStreak;
+    private String dictationPresentationId;
 }

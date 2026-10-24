@@ -14,7 +14,7 @@ public interface WordReviewLogMapper extends BaseMapper<WordReviewLog> {
 
     String HISTORY_FROM = """
         FROM word_review_log l INNER JOIN learning_batch b ON b.id = l.batch_id AND b.user_id = l.user_id
-        WHERE l.user_id = #{userId} AND l.word_id = #{wordId}
+        WHERE l.user_id = #{userId} AND l.word_id = #{wordId} AND b.practice_mode='RECOGNITION'
         """;
 
     @Select("SELECT COUNT(*) " + HISTORY_FROM)
