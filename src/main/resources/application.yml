@@ -17,6 +17,8 @@ server:
   port: ${SERVER_PORT:8080}
 
 app:
+  sentence:
+    editor-user-ids: ${SENTENCE_EDITOR_USER_IDS:}
   jwt:
     secret: ${JWT_SECRET_BASE64:}
     issuer: ${JWT_ISSUER:wordtrail}
