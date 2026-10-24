@@ -113,6 +113,95 @@ class LearningMigrationMySqlTests {
                 () -> run(c, "UPDATE learning_batch_item SET reinforcement_remaining=4 WHERE id=3"));
             assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
                 () -> run(c, "UPDATE learning_batch_item SET completion_reason='MASTERED' WHERE id=3"));
+            var beforeDictation=history(c);
+            run(c,new ClassPathResource("db/007_dictation.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeDictation,history(c));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM learning_batch WHERE practice_mode<>'RECOGNITION'"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM learning_batch_item WHERE dictation_target IS NOT NULL OR dictation_correct_streak IS NOT NULL"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM dictation_review_log"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"UPDATE learning_batch SET practice_mode='DICTATION' WHERE id=2"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"UPDATE learning_batch_item SET dictation_target='one' WHERE id=1"));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                    ()->run(second,new ClassPathResource("db/007_dictation.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
+            var beforeSentences=history(c);
+            run(c,new ClassPathResource("db/008_sentence_translation_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            run(c,new ClassPathResource("db/008_sentence_translation.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeSentences,history(c));
+            for(String table:List.of("sentence_question","sentence_word","sentence_translation_session","sentence_translation_item","sentence_translation_attempt","user_sentence_favorite"))
+                assertEquals("0",scalar(c,"SELECT COUNT(*) FROM "+table));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"INSERT INTO sentence_question(english_text,reference_translation,explanation,difficulty,source) VALUES('example','参考','解析',4,'original')"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"INSERT INTO sentence_question(english_text,reference_translation,explanation,source) VALUES('example','','解析','original')"));
+            run(c,new ClassPathResource("db/008_sentence_translation_samples.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals("6",scalar(c,"SELECT COUNT(*) FROM sentence_question"));
+            run(c,new ClassPathResource("db/008_sentence_translation_samples.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals("6",scalar(c,"SELECT COUNT(*) FROM sentence_question"));
+            run(c,new ClassPathResource("db/008_sentence_translation_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                    ()->run(second,new ClassPathResource("db/008_sentence_translation.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
+            run(c,"""
+                INSERT INTO sentence_word(sentence_id,word_id) SELECT MIN(id),1 FROM sentence_question;
+                INSERT INTO sentence_translation_session(id,user_id,selection_source,status,created_at,completed_at)
+                  VALUES(700,1,'BANK','COMPLETED','2025-02-01 10:00:00','2025-02-02 10:00:00');
+                INSERT INTO sentence_translation_item(id,session_id,sentence_id,sort_order,status,english_text,reference_translation,explanation,difficulty,source)
+                  SELECT 700,700,MIN(id),1,'DONE','Historical sentence.','旧译文','旧解析',1,'legacy' FROM sentence_question;
+                INSERT INTO sentence_translation_attempt(id,user_id,session_id,item_id,sentence_id,submit_request_id,action,translation,learning_date,submitted_at,self_assessment,review_request_id,review_date,reviewed_at)
+                  SELECT 700,1,700,700,MIN(id),'legacy_sentence_submit','ANSWER','原始用户输入','2025-02-01','2025-02-01 10:00:00','PARTIAL','legacy_sentence_review','2025-02-02','2025-02-02 10:00:00' FROM sentence_question;
+                """);
+            var oldAttempts=rows(c,"SELECT * FROM sentence_translation_attempt ORDER BY id");
+            var oldItems=rows(c,"SELECT * FROM sentence_translation_item ORDER BY id");
+            var oldSessions=rows(c,"SELECT * FROM sentence_translation_session ORDER BY id");
+            var oldQuestions=rows(c,"SELECT id,english_text,reference_translation,explanation,difficulty,source,source_reference,status FROM sentence_question ORDER BY id");
+            run(c,new ClassPathResource("db/009_sentence_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            run(c,new ClassPathResource("db/009_sentence_bank_review_statistics.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(oldAttempts,rows(c,"SELECT * FROM sentence_translation_attempt ORDER BY id"));
+            assertEquals(oldItems,rows(c,"SELECT * FROM sentence_translation_item ORDER BY id"));
+            assertEquals(oldSessions,rows(c,"SELECT * FROM sentence_translation_session ORDER BY id"));
+            assertEquals(oldQuestions,rows(c,"SELECT id,english_text,reference_translation,explanation,difficulty,source,source_reference,status FROM sentence_question ORDER BY id"));
+            assertEquals("1",scalar(c,"SELECT COUNT(*) FROM user_sentence_review_state WHERE user_id=1 AND last_attempt_id=700 AND review_level=0 AND next_review_date='2025-02-03'"));
+            assertEquals("1",scalar(c,"SELECT COUNT(*) FROM sentence_item_word WHERE item_id=700 AND word_id=1"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM sentence_import_batch"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM sentence_question WHERE version<>0"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"INSERT INTO sentence_question(english_text,reference_translation,explanation,source) SELECT english_text,'参考','解析','different source' FROM sentence_question LIMIT 1"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE user_sentence_review_state SET review_level=6"));
+            run(c,new ClassPathResource("db/009_sentence_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                    ()->run(second,new ClassPathResource("db/009_sentence_bank_review_statistics.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
+            run(c,"INSERT INTO refresh_token(user_id,token_hash,expires_at,created_at) VALUES(1,REPEAT('a',64),'2025-03-02 00:00:00','2025-03-01 00:00:00')");
+            var originalUsers=rows(c,"SELECT id,username,password_hash,nickname,created_at,updated_at FROM user_account ORDER BY id");
+            var originalRefresh=rows(c,"SELECT id,user_id,token_hash,expires_at,revoked_at,created_at FROM refresh_token ORDER BY id");
+            var originalAttemptRows=rows(c,"SELECT * FROM sentence_translation_attempt ORDER BY id");
+            run(c,new ClassPathResource("db/010_notes_auth_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            run(c,new ClassPathResource("db/010_notes_auth_sessions.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(originalUsers,rows(c,"SELECT id,username,password_hash,nickname,created_at,updated_at FROM user_account ORDER BY id"));
+            assertEquals(originalRefresh,rows(c,"SELECT id,user_id,token_hash,expires_at,revoked_at,created_at FROM refresh_token ORDER BY id"));
+            assertEquals(originalAttemptRows,rows(c,"SELECT * FROM sentence_translation_attempt ORDER BY id"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM user_account WHERE auth_version<>0"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM refresh_token WHERE session_id IS NOT NULL"));
+            for(String table:List.of("user_auth_session","user_sentence_note","user_sentence_note_tag"))assertEquals("0",scalar(c,"SELECT COUNT(*) FROM "+table));
+            run(c,"INSERT INTO user_sentence_note(user_id,sentence_id,content,attempt_id,version,updated_at) SELECT 1,MIN(id),'真实合成笔记',700,1,'2025-03-01 00:00:00' FROM sentence_question");
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"INSERT INTO user_sentence_note_tag(note_id,error_tag) SELECT id,'AUTOMATIC_GRADE' FROM user_sentence_note LIMIT 1"));
+            run(c,"INSERT INTO user_account(id,username,password_hash) VALUES(2,'other_legacy_fixture','unused')");
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"INSERT INTO user_sentence_note(user_id,sentence_id,content,attempt_id,version,updated_at) SELECT 2,MIN(id),'非法跨用户笔记',700,1,'2025-03-01 00:00:00' FROM sentence_question"));
+            run(c,new ClassPathResource("db/010_notes_auth_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                    ()->run(second,new ClassPathResource("db/010_notes_auth_sessions.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
         }
         // Keep the isolated schema for subsequent real-MySQL HTTP tests and manual inspection.
     }

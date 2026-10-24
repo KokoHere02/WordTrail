@@ -1,0 +1,68 @@
+name: Verify WordTrail
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backup-scripts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse backup scripts and reject invalid backups without database access
+        shell: pwsh
+        run: ./scripts/Test-BackupScripts.ps1
+  h2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '24'
+          cache: maven
+      - run: mvn -B -DargLine=-XX:TieredStopAtLevel=1 verify
+  mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-only-password
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DB_USERNAME: root
+      DB_PASSWORD: ci-only-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '24'
+          cache: maven
+      - name: Verify migrations in a generated database
+        env:
+          WORDTRAIL_VERIFY_MYSQL: 'true'
+        run: |
+          set -o pipefail
+          mvn -B -Dtest=LearningMigrationMySqlTests -DargLine=-XX:TieredStopAtLevel=1 test | tee migration.log
+          python3 - <<'PY'
+          import os, re
+          text = open('migration.log', encoding='utf-8').read()
+          schema = re.search(r'ISOLATED_MYSQL_VERIFICATION_SCHEMA=(wordtrail_daily_verify_[a-f0-9]{32})', text)
+          if not schema:
+              raise SystemExit('Missing isolated migration database')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'WORDTRAIL_MYSQL_TEST_SCHEMA={schema[1]}\n')
+              output.write(f'DB_URL=jdbc:mysql://127.0.0.1:3306/{schema[1]}?characterEncoding=UTF-8&serverTimezone=Asia/Shanghai\n')
+          PY
+      - name: Verify all application tests with MySQL
+        run: mvn -B -Dspring.profiles.active=mysql-test -DargLine=-XX:TieredStopAtLevel=1 verify

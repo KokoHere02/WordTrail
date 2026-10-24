@@ -5,6 +5,8 @@ spring:
     url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/word_trail_db?characterEncoding=UTF-8&serverTimezone=Asia/Shanghai}
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:root}
+    hikari:
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:5000}
   sql:
     init:
       mode: never

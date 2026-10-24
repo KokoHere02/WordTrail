@@ -23,7 +23,7 @@ public class AuthInterceptor implements AsyncHandlerInterceptor {
         if (CorsUtils.isPreFlightRequest(request)
                 || ("POST".equals(request.getMethod()) && PUBLIC_POSTS.contains(path))
                 || ("GET".equals(request.getMethod())
-                    && (path.equals("/favicon.ico") || path.startsWith("/assets/")))) {
+                    && (path.equals("/favicon.ico") || path.startsWith("/assets/") || path.equals("/health/live") || path.equals("/health/ready")))) {
             return true;
         }
         var headers = request.getHeaders("Authorization");
