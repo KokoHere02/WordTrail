@@ -12,7 +12,7 @@ public final class SentenceTranslationVO {
         long notUnderstoodCount,Long nextItemId,LocalDateTime createdAt,LocalDateTime completedAt) {}
     public record Current(Long itemId,Long sentenceId,String status,String englishText,Integer difficulty,String source,
         String sourceReference,List<LinkedWord> linkedWords,Long attemptId,String action,String translation,
-        String referenceTranslation,String explanation,String selfAssessment,LocalDateTime submittedAt) {}
+        String referenceTranslation,String explanation,String selfAssessment,LocalDateTime submittedAt,SentenceNoteVO.Note personalNote) {}
     public record Feedback(Long attemptId,Long itemId,Long sentenceId,String action,String translation,String referenceTranslation,
         String explanation,String selfAssessment,LocalDate learningDate,LocalDateTime submittedAt,LocalDate reviewDate,
         LocalDateTime reviewedAt,Progress progress,SentenceLearningVO.Schedule reviewSchedule) {}

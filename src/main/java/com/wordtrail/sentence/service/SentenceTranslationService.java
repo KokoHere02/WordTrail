@@ -32,6 +32,7 @@ public class SentenceTranslationService {
     private final SentenceReviewStateMapper reviewStates;
     private final SentenceReviewService reviews;
     private final SentenceItemWordMapper itemWords;
+    private final SentenceNoteService notes;
 
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public PageVO<Question> questions(SentenceQuestionQuery query,boolean onlyFavorites) {
@@ -108,7 +109,7 @@ public class SentenceTranslationService {
             entry.getSource(),entry.getSourceReference(),itemWords.selectListByQuery(QueryWrapper.create().where(column("item_id").eq(entry.getId())).orderBy(column("word_id").asc())).stream().map(w->new LinkedWord(w.getWordId(),w.getWord())).toList(),
             attempt==null?null:attempt.getId(),attempt==null?null:attempt.getAction(),attempt==null?null:attempt.getTranslation(),
             attempt==null?null:entry.getReferenceTranslation(),attempt==null?null:entry.getExplanation(),
-            attempt==null?null:attempt.getSelfAssessment(),attempt==null?null:attempt.getSubmittedAt());
+            attempt==null?null:attempt.getSelfAssessment(),attempt==null?null:attempt.getSubmittedAt(),notes.get(entry.getSentenceId()));
     }
 
     @Transactional
