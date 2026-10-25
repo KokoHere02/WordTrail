@@ -3,4 +3,5 @@ package com.wordtrail.learning.vo;
 import java.time.LocalDate;
 
 public record CalendarDayVO(LocalDate learningDate, long completedCount, long answerCount,
-        boolean hasLearningActivity, boolean statisticsComplete, long incompleteWordCount) {}
+        boolean hasLearningActivity, boolean statisticsComplete, long incompleteWordCount,
+        long trainingCount, long recalledCount) {}

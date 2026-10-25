@@ -42,7 +42,7 @@ public class LearningStatisticsService {
             LocalDate date = month.atDay(day);
             var row = rows.getOrDefault(date, empty(date));
             days.add(new CalendarDayVO(date, row.completedCount(), row.answerCount(),
-                row.hasLearningActivity(), row.statisticsComplete(), row.incompleteWordCount()));
+                row.hasLearningActivity(), row.statisticsComplete(), row.incompleteWordCount(),row.trainingCount(),row.recalledCount()));
         }
         return new LearningCalendarVO(month.toString(), days.stream().allMatch(CalendarDayVO::statisticsComplete), days);
     }
@@ -70,7 +70,7 @@ public class LearningStatisticsService {
     }
 
     private DailyStatisticsVO empty(LocalDate date) {
-        return new DailyStatisticsVO(date, 0, 0, 0, 0, 0, false, true, 0);
+        return new DailyStatisticsVO(date, 0, 0, 0, 0, 0, false, true, 0,0,0,0);
     }
 
     private BusinessException invalid(String message) {

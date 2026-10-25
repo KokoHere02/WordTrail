@@ -41,6 +41,9 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
         """ + ANSWERS + ") a ";
     String COMPLETE = """
         CASE WHEN i.answer_count=COALESCE(a.item_answers,0)
+          AND (#{source}='PRACTICE' OR i.study_attempt_count=(SELECT COUNT(*) FROM word_training_attempt t
+            JOIN learning_batch tb ON tb.id=t.batch_id AND tb.user_id=t.user_id AND tb.learning_date=t.learning_date
+            WHERE t.user_id=#{userId} AND t.batch_item_id=i.id AND t.batch_id=i.batch_id AND t.word_id=i.word_id))
           AND ((a.id IS NOT NULL AND i.result=a.effective_result)
             OR (a.id IS NULL AND i.result IS NULL AND i.answered_at IS NULL
                 AND i.learning_status IN ('PENDING','SKIPPED')))

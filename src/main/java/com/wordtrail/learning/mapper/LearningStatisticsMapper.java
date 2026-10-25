@@ -36,13 +36,15 @@ public interface LearningStatisticsMapper extends BaseMapper<LearningBatchItem> 
         GROUP BY l.batch_item_id, l.corrects_log_id
         """;
     String FACTS = """
-        SELECT i.id AS item_id, i.word_id, b.learning_date, i.item_type, i.learning_status,
-               COALESCE(a.answer_count, 0) AS answer_count,
+        SELECT i.id AS item_id, i.word_id, b.learning_date, i.item_type, i.learning_status,i.completion_reason,
+               COALESCE(activity.answer_count, 0) AS answer_count,
+               COALESCE(activity.training_count, 0) AS training_count,
                COALESCE(i.result, c.result, original.result) AS last_result,
-               CASE WHEN COALESCE(a.event_count, 0) > 0 OR i.answer_count > 0
+               CASE WHEN COALESCE(activity.training_count, 0)>0 OR COALESCE(a.event_count, 0) > 0 OR i.answer_count > 0
                          OR i.result IS NOT NULL OR i.answered_at IS NOT NULL
                          OR i.learning_status IN ('DONE', 'RELEARNING') THEN 1 ELSE 0 END AS studied,
                CASE WHEN i.answer_count = COALESCE(a.answer_count, 0)
+                     AND i.study_attempt_count=COALESCE(activity.unified_count,0)
                      AND (a.latest_answer_id IS NOT NULL OR
                           (COALESCE(a.event_count, 0) = 0 AND i.result IS NULL
                            AND i.answered_at IS NULL AND i.learning_status IN ('PENDING', 'SKIPPED')))
@@ -58,6 +60,13 @@ public interface LearningStatisticsMapper extends BaseMapper<LearningBatchItem> 
         """ + LATEST_CORRECTIONS + """
         ) latest ON latest.batch_item_id = i.id AND latest.corrects_log_id = a.latest_answer_id
         LEFT JOIN word_review_log c ON c.id = latest.correction_id
+        LEFT JOIN (
+          SELECT item_id,COUNT(*) AS training_count,SUM(unified) AS unified_count,
+            SUM(CASE WHEN action='ANSWER' THEN 1 ELSE 0 END) AS answer_count
+          FROM (
+        """ + LearningActivitySql.EVENTS + """
+          ) events WHERE task_type='DAILY' GROUP BY item_id
+        ) activity ON activity.item_id=i.id
         WHERE
         """ + DATE_SCOPE;
 
@@ -70,7 +79,11 @@ public interface LearningStatisticsMapper extends BaseMapper<LearningBatchItem> 
                COUNT(DISTINCT CASE WHEN studied = 1 AND last_result IN (2, 3) THEN word_id END) AS unfamiliar_count,
                CASE WHEN MAX(studied) = 1 THEN TRUE ELSE FALSE END AS has_learning_activity,
                CASE WHEN MIN(statistics_complete) = 1 THEN TRUE ELSE FALSE END AS statistics_complete,
-               COUNT(DISTINCT CASE WHEN statistics_complete = 0 THEN word_id END) AS incomplete_word_count
+               COUNT(DISTINCT CASE WHEN statistics_complete = 0 THEN word_id END) AS incomplete_word_count,
+               SUM(training_count) AS training_count,
+               COUNT(DISTINCT CASE WHEN training_count>0 THEN word_id END) AS studied_count,
+               COUNT(DISTINCT CASE WHEN learning_status='DONE' AND completion_reason='RECALLED'
+                  AND last_result=1 AND statistics_complete=1 THEN word_id END) AS recalled_count
         FROM (
         """ + FACTS + """
         ) item_statistics GROUP BY learning_date ORDER BY learning_date

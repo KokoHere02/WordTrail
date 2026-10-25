@@ -3849,6 +3849,64 @@ class LearningIntegrationTests {
         for(int attempt=0;attempt<6;attempt++) last=train(batch,trainingQuestion(batch,null),"wrong",null);
         assertEquals("LIMIT_REACHED",last.get("completionReason").asText()); assertEquals("DONE",last.get("itemStatus").asText());
         var statistics=statisticsDaily(statisticsDate()); assertEquals(3,statistics.get("completedCount").asInt());
+        assertEquals(1,statistics.get("recalledCount").asInt());
+    }
+
+    @Test void trainingPolishWrongCopyAndExtraTrainingCountInOverviewWithoutDuplicateCompletion() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+        var q=trainingQuestion(batch,null); train(batch,q,"wrong",null);
+        var summary=insightSummary("DAILY"); assertTrue(summary.get("hasStudiedToday").asBoolean());
+        assertEquals(1,summary.get("todayTrainingCount").asInt()); assertEquals(1,summary.get("todayAnswerCount").asInt());
+        assertEquals(0,summary.get("todayCompletedCount").asInt()); assertEquals(0,summary.get("todayRecalledCount").asInt());
+        assertEquals(0,logCount(batch));
+        var day=statisticsDaily(statisticsDate()); assertTrue(day.get("hasLearningActivity").asBoolean());
+        assertEquals(1,day.get("trainingCount").asInt()); assertEquals(1,day.get("studiedCount").asInt());
+        train(batch,trainingQuestion(batch,null),spelling(1),null); studyMode(batch,"DICTATION");
+        train(batch,trainingQuestion(batch,q.get("itemId").asLong()),spelling(1),null);
+        summary=insightSummary("DAILY"); day=statisticsDaily(statisticsDate());
+        assertEquals(3,summary.get("todayTrainingCount").asInt()); assertEquals(3,summary.get("todayAnswerCount").asInt());
+        assertEquals(1,summary.get("todayCompletedCount").asInt()); assertEquals(0,summary.get("todayRecalledCount").asInt());
+        assertEquals(3,day.get("answerCount").asInt()); assertEquals(1,day.get("completedCount").asInt());
+        var trend=insightTrend("DAILY",7); assertEquals(3,trend.get("totalTrainingCount").asInt());
+        assertEquals(3,insightDay(trend,statisticsDate()).get("answerCount").asInt());
+        assertEquals(0,insightSummary("PRACTICE").get("todayTrainingCount").asInt());
+    }
+
+    @Test void trainingPolishRevealCountsAsActivityButNotAnswerCompletionOrRecall() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); var q=trainingQuestion(batch,null);
+        train(batch,q,null,null); trainingQuestion(batch,null); trainingQuestion(batch,null);
+        var summary=insightSummary("DAILY"); assertEquals(1,summary.get("totalStudyDays").asInt());
+        assertEquals(1,summary.get("todayTrainingCount").asInt()); assertEquals(0,summary.get("todayAnswerCount").asInt());
+        assertEquals(0,summary.get("todayCompletedCount").asInt());
+        var day=insightDay(insightTrend("DAILY",7),statisticsDate()); assertTrue(day.get("hasLearningActivity").asBoolean());
+        assertFalse(day.get("hasRecordedAnswers").asBoolean());
+        var answered=train(batch,trainingQuestion(batch,null),null,1);
+        assertEquals(2,insightSummary("DAILY").get("todayTrainingCount").asInt());
+        assertEquals(1,insightSummary("DAILY").get("todayRecalledCount").asInt());
+        correction(batch,q.get("itemId").asLong(),answered.get("reviewLogId").asLong(),3,requestId());
+        assertEquals(0,insightSummary("DAILY").get("todayRecalledCount").asInt());
+        assertEquals(2,insightSummary("DAILY").get("todayTrainingCount").asInt());
+    }
+
+    @Test void trainingPolishActivityDaysAndCalendarIncludeTrainingWithoutEffectiveFeedback() throws Exception {
+        var firstDate=LocalDate.of(2026,10,25); insightDate(firstDate); joinPlan(wordIds.get(1));
+        long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING"); train(batch,trainingQuestion(batch,null),"wrong",null);
+        advanceDays(1); long next=startDay().get("batchId").asLong(); studyMode(next,"RECOGNITION"); train(next,trainingQuestion(next,null),null,null);
+        var summary=insightSummary("DAILY"); assertEquals(2,summary.get("currentStreak").asInt()); assertEquals(2,summary.get("totalStudyDays").asInt());
+        var calendar=get("/api/learning/statistics/calendar?month=2026-10",tokenA);
+        JsonNode found=null; for(var row:calendar.get("days")) if(firstDate.toString().equals(row.get("learningDate").asText())) found=row;
+        assertNotNull(found); assertTrue(found.get("hasLearningActivity").asBoolean()); assertEquals(1,found.get("trainingCount").asInt());
+        assertEquals(0,found.get("completedCount").asInt());
+        assertEquals(0,get("/api/learning/statistics/summary?source=DAILY",tokenB).get("totalStudyDays").asInt());
+    }
+
+    @Test void trainingPolishMissingTrainingEventsAreReportedIncompleteWithoutInventingActivity() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+        var answer=train(batch,trainingQuestion(batch,null),"wrong",null); trainingAttempts.deleteById(answer.get("trainingId").asLong());
+        var day=statisticsDaily(statisticsDate()); assertFalse(day.get("statisticsComplete").asBoolean());
+        assertEquals(1,day.get("incompleteWordCount").asInt()); assertEquals(0,day.get("trainingCount").asInt());
+        assertEquals(0,insightSummary("DAILY").get("totalStudyDays").asInt());
+        assertFalse(insightSummary("DAILY").get("coverage").get("statisticsComplete").asBoolean());
     }
 
     private String dictationPath(long batch) { return "/api/dictation/batches/"+batch; }

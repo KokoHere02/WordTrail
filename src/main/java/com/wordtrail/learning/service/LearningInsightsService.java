@@ -31,17 +31,20 @@ public class LearningInsightsService {
         var from = today.minusDays(query.getDays()-1L); var source = query.getSource();
         var recorded = insights.recordedDays(userId,source.name(),from,today).stream()
             .collect(Collectors.toMap(LearningInsightsMapper.RecordedDay::learningDate,Function.identity()));
-        var completed = dailyCompletions(userId,source,from,today);
+        var completed = dailyDays(userId,source,from,today);
         var days = new ArrayList<LearningTrendDayVO>(query.getDays());
         for (var date = from; !date.isAfter(today); date = date.plusDays(1)) {
             var row = recorded.get(date);
             long answers = row == null ? 0 : row.answerCount(), studied = row == null ? 0 : row.studiedCount();
-            long finished = source == LearningSource.DAILY ? completed.getOrDefault(date,0L) : studied;
-            days.add(new LearningTrendDayVO(date,finished,answers,studied,answers>0));
+            var daily=completed.get(date);
+            long finished = source == LearningSource.DAILY ? daily==null?0:daily.completedCount() : studied;
+            long trained=row==null?0:row.trainingCount(),recalled=daily==null?0:daily.recalledCount();
+            days.add(new LearningTrendDayVO(date,finished,answers,studied,answers>0,trained,recalled,trained>0));
         }
         return new LearningTrendVO(source.name(),query.getDays(),from,today,
             days.stream().mapToLong(LearningTrendDayVO::completedCount).sum(),
-            days.stream().mapToLong(LearningTrendDayVO::answerCount).sum(),coverage(userId,source),days);
+            days.stream().mapToLong(LearningTrendDayVO::answerCount).sum(),coverage(userId,source),days,
+            days.stream().mapToLong(LearningTrendDayVO::trainingCount).sum(),days.stream().mapToLong(LearningTrendDayVO::recalledCount).sum());
     }
 
     public LearningSummaryVO summary(StatisticsSourceQuery query) {
@@ -56,16 +59,17 @@ public class LearningInsightsService {
         var last = days.isEmpty() ? null : days.getLast();
         boolean studiedToday = last != null && last.learningDate().equals(today);
         long answers = studiedToday ? last.answerCount() : 0, studied = studiedToday ? last.studiedCount() : 0;
-        long completed = source == LearningSource.DAILY
-            ? dailyCompletions(userId,source,today,today).getOrDefault(today,0L) : studied;
+        var daily=dailyDays(userId,source,today,today).get(today);
+        long completed = source == LearningSource.DAILY ? daily==null?0:daily.completedCount() : studied;
         var goal = source == LearningSource.DAILY ? goal(userId,today,completed) : null;
         return new LearningSummaryVO(today,source.name(),current,longest,days.size(),studiedToday,
-            studied,completed,answers,goal,coverage(userId,source));
+            studied,completed,answers,goal,coverage(userId,source),studiedToday?last.trainingCount():0,
+            daily==null?0:daily.recalledCount());
     }
 
-    private Map<LocalDate,Long> dailyCompletions(long userId,LearningSource source,LocalDate from,LocalDate to) {
+    private Map<LocalDate,DailyStatisticsVO> dailyDays(long userId,LearningSource source,LocalDate from,LocalDate to) {
         return source != LearningSource.DAILY ? Map.of() : statistics.dailyStatistics(userId,from,to).stream()
-            .collect(Collectors.toMap(DailyStatisticsVO::learningDate,DailyStatisticsVO::completedCount));
+            .collect(Collectors.toMap(DailyStatisticsVO::learningDate,Function.identity()));
     }
 
     private LearningSummaryVO.DailyGoal goal(long userId,LocalDate today,long completed) {

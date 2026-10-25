@@ -4,4 +4,5 @@ import java.time.LocalDate;
 
 public record DailyStatisticsVO(LocalDate learningDate, long completedCount, long answerCount,
         long newCompletedCount, long reviewCompletedCount, long unfamiliarCount,
-        boolean hasLearningActivity, boolean statisticsComplete, long incompleteWordCount) {}
+        boolean hasLearningActivity, boolean statisticsComplete, long incompleteWordCount,
+        long trainingCount, long studiedCount, long recalledCount) {}

@@ -5,7 +5,7 @@ import java.time.LocalDate;
 public record LearningSummaryVO(LocalDate learningDate, String source, long currentStreak,
         long longestStreak, long totalStudyDays, boolean hasStudiedToday,
         long todayStudiedCount, long todayCompletedCount, long todayAnswerCount,
-        DailyGoal goal, StatisticsCoverageVO coverage) {
+        DailyGoal goal, StatisticsCoverageVO coverage, long todayTrainingCount, long todayRecalledCount) {
     public record DailyGoal(int dailyTarget, long completedCount, long remainingCount,
             boolean reached, String targetSource, Long batchId, String taskStatus) {}
 }
