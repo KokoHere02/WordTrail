@@ -23,6 +23,11 @@ public class ReviewEvents {
             .where(column("user_id").eq(userId)).and(column("request_id").eq(requestId)));
     }
 
+    public void markMode(WordReviewLog event,String mode) {
+        event.setFeedbackMode(mode);
+        if(logs.update(event)!=1) throw new IllegalStateException("Could not persist feedback mode");
+    }
+
     public WordReviewLog request(long userId, String requestId, long batchId, long itemId,
             String eventType, int result, Long corrects) {
         if (requestId == null) { return null; }

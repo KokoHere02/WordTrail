@@ -23,4 +23,6 @@ public class LearningBatch {
     private String practiceMode;
     private LocalDate learningDate;
     private Integer dailyTarget;
+    private String studyMode;
+    private Long modeVersion;
 }

@@ -202,6 +202,36 @@ class LearningMigrationMySqlTests {
                 assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
                     ()->run(second,new ClassPathResource("db/010_notes_auth_sessions.sql").getContentAsString(StandardCharsets.UTF_8)));
             }
+            run(c,"""
+                INSERT INTO word_review_log(user_id,word_id,batch_id,batch_item_id,request_id,event_type,learning_date,result,attempt_no,affects_schedule,schedule_before,schedule_after,answered_at,created_at)
+                VALUES(1,1,1,1,'pre_unified_recognition','ANSWER','2025-01-02',2,1,0,'{"reviewLevel":0}','{"reviewLevel":0}','2025-01-02 03:04:05','2025-01-02 03:04:05');
+                """);
+            var beforeUnified=history(c);
+            var beforeWordEvents=rows(c,"SELECT * FROM word_review_log ORDER BY id");
+            var beforeDictationEvents=rows(c,"SELECT * FROM dictation_review_log ORDER BY id");
+            var beforeSchedules=rows(c,"SELECT id,review_level,next_review_at,plan_status FROM user_word_state ORDER BY id");
+            run(c,new ClassPathResource("db/011_training_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            run(c,new ClassPathResource("db/011_unified_daily_training.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeUnified,history(c));
+            assertEquals(beforeSchedules,rows(c,"SELECT id,review_level,next_review_at,plan_status FROM user_word_state ORDER BY id"));
+            assertEquals(beforeDictationEvents,rows(c,"SELECT * FROM dictation_review_log ORDER BY id"));
+            var newWordEvents=rows(c,"SELECT * FROM word_review_log ORDER BY id");
+            assertEquals(beforeWordEvents,newWordEvents.stream().map(r->r.subList(0,r.size()-1)).toList());
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM learning_batch WHERE study_mode<>'RECOGNITION' OR mode_version<>0"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM learning_batch_item WHERE study_word IS NOT NULL OR study_hint_used<>0 OR study_attempt_count<>0"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM word_training_attempt"));
+            assertEquals("RECOGNITION",scalar(c,"SELECT feedback_mode FROM word_review_log WHERE request_id='pre_unified_recognition'"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"UPDATE learning_batch SET study_mode='AUTOMATIC' WHERE id=2"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                ()->run(c,"UPDATE learning_batch_item SET study_presentation_id='bad' WHERE id=3"));
+            run(c,"UPDATE learning_batch_item SET completion_reason='FOLLOW_TYPED' WHERE id=3");
+            run(c,new ClassPathResource("db/011_training_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
+                    ()->run(second,new ClassPathResource("db/011_unified_daily_training.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
         }
         // Keep the isolated schema for subsequent real-MySQL HTTP tests and manual inspection.
     }

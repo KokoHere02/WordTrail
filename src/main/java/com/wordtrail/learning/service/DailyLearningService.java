@@ -88,6 +88,7 @@ public class DailyLearningService {
         var batch=new LearningBatch(); batch.setUserId(userId); batch.setTaskType("DAILY");
         batch.setSelectionType("DAILY"); batch.setStatus("IN_PROGRESS"); batch.setLearningDate(date);
         batch.setDailyTarget(target); batch.setCreatedAt(now); batch.setUpdatedAt(now);
+        batch.setStudyMode(settings.preferredMode(userId)); batch.setModeVersion(0L);
         try {
             if(batches.insertSelective(batch)!=1) { throw new IllegalStateException("Could not create daily task"); }
         } catch(DuplicateKeyException ex) {
@@ -119,10 +120,15 @@ public class DailyLearningService {
         int sort=entries.stream().mapToInt(LearningBatchItem::getSortOrder).max().orElse(0);
         long queue=entries.stream().mapToLong(LearningBatchItem::getQueueOrder).max().orElse(0);
         var added=new ArrayList<LearningBatchItem>();
+        var wordSnapshots=words.selectListByQuery(QueryWrapper.create().where(column("id").in(
+            selection.words().stream().map(UserWordState::getWordId).toList()))).stream()
+            .collect(java.util.stream.Collectors.toMap(com.wordtrail.word.entity.Word::getId,java.util.function.Function.identity()));
         for(int i=0;i<selection.words().size();i++) {
             var item=new LearningBatchItem(); item.setBatchId(batch.getId()); item.setWordId(selection.words().get(i).getWordId());
             item.setSortOrder(sort+i+1); item.setQueueOrder(queue+i+1); item.setItemType(i<selection.reviews()?"REVIEW":"NEW");
             item.setLearningStatus("PENDING"); item.setAnswerCount(0); item.setRelearnCount(0); item.setReinforcementRemaining(0);
+            var word=wordSnapshots.get(item.getWordId());
+            item.setStudyWord(word.getWord()); item.setStudyTranslation(word.getTranslation()); item.setStudyPhonetic(word.getPhonetic());
             added.add(item);
         }
         if(items.insertBatch(added)!=added.size()) { throw new IllegalStateException("Could not persist daily queue"); }
@@ -142,7 +148,7 @@ public class DailyLearningService {
             .map(b->view(b,grouped.getOrDefault(b.getId(),List.of()),canContinue(b,today))).toList());
     }
 
-    private LearningBatch daily(long userId, long batchId, boolean lock, LocalDate writingDate) {
+    LearningBatch daily(long userId, long batchId, boolean lock, LocalDate writingDate) {
         var batch=context.ownedBatch(userId,batchId,lock);
         if(!"DAILY".equals(batch.getTaskType())) { throw conflict("NOT_DAILY_TASK", "请使用专项练习接口"); }
         if(writingDate!=null && !writingDate.equals(batch.getLearningDate())) { throw conflict("DAILY_TASK_EXPIRED", "历史每日任务只读，请进入今日学习"); }
@@ -159,11 +165,12 @@ public class DailyLearningService {
     @Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
     public DailyItemVO item(long batchId,long itemId) {
         long userId=currentUser.id(); var today=context.today(); var batch=daily(userId,batchId,false,null);
+        if(!"RECOGNITION".equals(batch.getStudyMode())) throw conflict("TRAINING_ENDPOINT_REQUIRED", "当前模式请使用统一训练接口");
         var entries=context.entries(batchId); var item=find(entries,itemId); var word=words.selectOneById(item.getWordId());
         var latest=events.latestAnswer(userId);
         boolean skipped="SKIPPED".equals(item.getLearningStatus());
         Long correctable=!skipped && latest!=null && latest.getBatchItemId()==itemId && today.equals(latest.getLearningDate())
-            && today.equals(batch.getLearningDate()) ? latest.getId():null;
+            && today.equals(batch.getLearningDate()) && "RECOGNITION".equals(latest.getFeedbackMode()) ? latest.getId():null;
         boolean done="DONE".equals(item.getLearningStatus());
         return new DailyItemVO(itemId,word.getId(),word.getWord(),word.getPhonetic(),done?word.getTranslation():null,
             item.getItemType(),item.getLearningStatus(),item.getResult(),item.getAnswerCount(),
@@ -182,9 +189,16 @@ public class DailyLearningService {
 
     @Transactional
     public DailyAnswerVO answer(long batchId,long itemId,DailyAnswerRequest request) {
+        return answerInMode(batchId,itemId,request,StudyMode.RECOGNITION,false,false,null);
+    }
+
+    DailyAnswerVO answerInMode(long batchId,long itemId,DailyAnswerRequest request,StudyMode mode,boolean hinted,boolean unified,
+            LocalDateTime actionTime) {
         long userId=currentUser.id(); context.lockUser(userId);
-        var now=context.now();
+        var now=actionTime==null?context.now():actionTime;
         var batch=daily(userId,batchId,true,now.toLocalDate()); var entries=context.entries(batchId); var item=find(entries,itemId);
+        if(!unified && (!"RECOGNITION".equals(batch.getStudyMode()) || item.getStudyPresentationId()!=null))
+            throw conflict("TRAINING_ENDPOINT_REQUIRED", "请按当前展示使用统一训练接口");
         var state=availableState(userId,item);
         var previous=events.request(userId,request.requestId(),batchId,itemId,"ANSWER",request.result(),null);
         if(previous!=null) {
@@ -197,14 +211,22 @@ public class DailyLearningService {
         int remaining=remaining(userId,item);
         var before=snapshot(state,request.attemptNo(),remaining);
         boolean schedule=item.getAnswerCount()==0;
-        if(schedule) { applySchedule(state,before,request.result(),batch.getLearningDate()); }
+        if(schedule) {
+            int schedulingResult=mode==StudyMode.FOLLOW_TYPING || (mode==StudyMode.DICTATION && hinted) ? 2 : request.result();
+            applySchedule(state,before,schedulingResult,batch.getLearningDate());
+        } else if(mode!=StudyMode.RECOGNITION && (mode==StudyMode.FOLLOW_TYPING || hinted || request.result()!=1)
+                && state.getNextReviewAt()!=null && state.getNextReviewAt().isAfter(batch.getLearningDate().plusDays(1).atStartOfDay())) {
+            applySchedule(state,before,2,batch.getLearningDate()); schedule=true;
+        }
         if(state.getFirstLearnedAt()==null) { state.setFirstLearnedAt(now); }
         state.setLastLearnedAt(now); state.setLastResult(request.result()); state.setLastBatchItemId(itemId);
         if(states.update(state)!=1) { throw new IllegalStateException("Could not update word memory"); }
         item.setAnswerCount(item.getAnswerCount()+1); item.setRelearnCount(Math.max(0,item.getAnswerCount()-1));
-        applyFeedback(item,entries,request.result(),now,remaining);
+        item.setStudyHintUsed(true);
+        applyFeedback(item,entries,request.result(),now,remaining,mode,hinted);
         var event=events.append(userId,item,request.requestId(),"ANSWER",null,request.result(),schedule,
             encode(before),encode(snapshot(state,request.attemptNo(),item.getReinforcementRemaining())),now);
+        if(mode!=StudyMode.RECOGNITION) events.markMode(event,mode.name());
         updateBatch(batch,entries,now);
         return answerView(event,batch,entries);
     }
@@ -219,7 +241,8 @@ public class DailyLearningService {
         if(previous!=null) { return answerView(previous,batch,entries); }
         var original=events.latestAnswer(userId);
         if(original==null || !original.getId().equals(request.logId()) || original.getBatchItemId()!=itemId
-                || original.getBatchId()!=batchId || !now.toLocalDate().equals(original.getLearningDate())) {
+                || original.getBatchId()!=batchId || !now.toLocalDate().equals(original.getLearningDate())
+                || !"RECOGNITION".equals(original.getFeedbackMode())) {
             throw conflict("CORRECTION_NOT_ALLOWED","只能更正今日最近一次作答");
         }
         var before=snapshot(state,item.getAnswerCount(),remaining(userId,item));
@@ -240,7 +263,7 @@ public class DailyLearningService {
         return answerView(event,batch,entries);
     }
 
-    private UserWordState availableState(long userId,LearningBatchItem item) {
+    UserWordState availableState(long userId,LearningBatchItem item) {
         if ("SKIPPED".equals(item.getLearningStatus())) {
             throw conflict("PLAN_WORD_UNAVAILABLE","该词已暂停、移出或本日已跳过，请重新获取任务进度和下一词");
         }
@@ -268,10 +291,18 @@ public class DailyLearningService {
         return remaining;
     }
     private void applyFeedback(LearningBatchItem item,List<LearningBatchItem> entries,int result,LocalDateTime now,int remainingBefore) {
+        applyFeedback(item,entries,result,now,remainingBefore,StudyMode.RECOGNITION,false);
+    }
+    private void applyFeedback(LearningBatchItem item,List<LearningBatchItem> entries,int result,LocalDateTime now,int remainingBefore,
+            StudyMode mode,boolean hinted) {
         item.setResult(result); item.setAnsweredAt(now);
         var outcome=reinforcement.feedback(remainingBefore,item.getAnswerCount(),result);
         item.setReinforcementRemaining(outcome.remaining()); item.setCompletionReason(outcome.completionReason());
-        boolean done=outcome.done();
+        boolean done=outcome.done() || mode==StudyMode.FOLLOW_TYPING;
+        if(mode==StudyMode.FOLLOW_TYPING) { item.setCompletionReason("FOLLOW_TYPED"); item.setReinforcementRemaining(0); }
+        else if(mode==StudyMode.DICTATION && hinted && result==2) {
+            done=true; item.setCompletionReason("ASSISTED"); item.setReinforcementRemaining(0);
+        }
         item.setLearningStatus(done?"DONE":"RELEARNING"); item.setCompletedAt(done?now:null);
         if(!done) {
             var others=entries.stream().filter(i->!i.getId().equals(item.getId()) && queued(i))
@@ -295,7 +326,7 @@ public class DailyLearningService {
             throw new IllegalStateException("Could not save daily progress");
         }
     }
-    private LearningBatchItem find(List<LearningBatchItem> entries,long id) {
+    LearningBatchItem find(List<LearningBatchItem> entries,long id) {
         return entries.stream().filter(i->i.getId()==id).findFirst().orElseThrow(()->
             new BusinessException(HttpStatus.NOT_FOUND,"ITEM_NOT_FOUND","学习明细不存在或不属于该批次"));
     }
@@ -303,14 +334,14 @@ public class DailyLearningService {
         return Comparator.comparing(LearningBatchItem::getQueueOrder).thenComparing(LearningBatchItem::getSortOrder)
             .thenComparing(LearningBatchItem::getId);
     }
-    private Long next(List<LearningBatchItem> entries) {
+    Long next(List<LearningBatchItem> entries) {
         return entries.stream().filter(this::queued).min(queueOrder())
             .map(LearningBatchItem::getId).orElse(null);
     }
     private boolean queued(LearningBatchItem item) {
         return "PENDING".equals(item.getLearningStatus()) || "RELEARNING".equals(item.getLearningStatus());
     }
-    private DailyTaskVO view(LearningBatch batch,List<LearningBatchItem> entries) {
+    DailyTaskVO view(LearningBatch batch,List<LearningBatchItem> entries) {
         return view(batch,entries,true);
     }
     private boolean canContinue(LearningBatch batch,LocalDate today) {
@@ -322,9 +353,11 @@ public class DailyLearningService {
             entries.stream().filter(i->"SKIPPED".equals(i.getLearningStatus())).count(),
             entries.stream().mapToLong(LearningBatchItem::getAnswerCount).sum(),
             entries.stream().filter(i->"DONE".equals(i.getLearningStatus())
-                && (!Objects.equals(i.getResult(),1) || "LIMIT_REACHED".equals(i.getCompletionReason()))).count(),
+                && (!Objects.equals(i.getResult(),1) || "LIMIT_REACHED".equals(i.getCompletionReason())
+                    || "ASSISTED".equals(i.getCompletionReason()))).count(),
             entries.stream().filter(i->"NEW".equals(i.getItemType())).count(),
-            entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count(),actionable?next(entries):null);
+            entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count(),actionable?next(entries):null,
+            batch.getStudyMode(),batch.getModeVersion(),entries.stream().mapToLong(LearningBatchItem::getStudyAttemptCount).sum());
     }
     private DailyAnswerVO answerView(WordReviewLog event,LearningBatch batch,List<LearningBatchItem> entries) {
         var word=words.selectOneById(event.getWordId());

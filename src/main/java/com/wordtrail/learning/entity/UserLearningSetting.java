@@ -13,6 +13,7 @@ public class UserLearningSetting {
     @Id
     private Long userId;
     private Integer dailyTarget;
+    private String preferredStudyMode;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

@@ -26,4 +26,5 @@ public class WordReviewLog {
     private String scheduleAfter;
     private LocalDateTime answeredAt;
     private LocalDateTime createdAt;
+    private String feedbackMode;
 }

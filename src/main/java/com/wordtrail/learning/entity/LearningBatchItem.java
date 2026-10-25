@@ -31,4 +31,12 @@ public class LearningBatchItem {
     private Boolean dictationHadFailure;
     private Integer dictationCorrectStreak;
     private String dictationPresentationId;
+    private String studyWord;
+    private String studyTranslation;
+    private String studyPhonetic;
+    private Boolean studyHintUsed = false;
+    private Integer studyAttemptCount = 0;
+    private String studyPresentationId;
+    private Long studyPresentationVersion;
+    private Boolean studyExtraTraining = false;
 }
