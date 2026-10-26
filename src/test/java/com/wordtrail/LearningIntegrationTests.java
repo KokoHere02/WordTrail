@@ -87,7 +87,16 @@ class LearningIntegrationTests {
     @TestConfiguration static class Instrumentation {
         @Bean DatabaseProbe databaseProbe() { return new DatabaseProbe(); }
         @Bean @Primary StudyClock studyClock() { return new StudyClock(); }
+        @Bean @Primary FixtureAudio fixtureAudio() { return new FixtureAudio(); }
     }
+    static class FixtureAudio implements com.wordtrail.learning.service.PronunciationProvider {
+        volatile String lastWord;
+        volatile com.wordtrail.learning.dto.PronunciationRequest.Accent lastAccent;
+        public byte[] audio(String word,com.wordtrail.learning.dto.PronunciationRequest.Accent accent) {
+            lastWord=word; lastAccent=accent; return "ID3-test-pronunciation".getBytes(StandardCharsets.UTF_8);
+        }
+    }
+    @Autowired private FixtureAudio audioFixture;
 
     static class StudyClock extends Clock {
         private volatile Instant now = Instant.now();
@@ -3926,6 +3935,12 @@ class LearningIntegrationTests {
         var response=call("PUT",focusPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer",trainingBody(question,input,result,requestId()),tokenA);
         assertEquals(200,response.statusCode(),response.body()); return data(response);
     }
+    private HttpResponse<byte[]> download(String path,String token) throws Exception {
+        var builder=HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+environment.getProperty("local.server.port")+path)).GET();
+        if(token!=null) builder.header("Authorization","Bearer "+token);
+        return client.send(builder.build(),HttpResponse.BodyHandlers.ofByteArray());
+    }
+
     @Test void expansionAllocationReservesNewWordsAndCapsReviewBacklogForTheWholeDay() throws Exception {
         joinPlan(wordIds.get(0),wordIds.get(1),wordIds.get(2),wordIds.get(3));
         for(int index=0;index<2;index++) { var value=state(a,wordIds.get(index)); value.setFirstLearnedAt(statisticsDate().minusDays(3).atStartOfDay()); value.setNextReviewAt(statisticsDate().minusDays(2-index).atStartOfDay()); states.update(value); }
@@ -4013,6 +4028,31 @@ class LearningIntegrationTests {
         probe.failAfterMapper="com.wordtrail.learning.mapper.WordTrainingAttemptMapper";
         try { assertEquals(500,call("PUT",focusPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",trainingBody(q,spelling(1),null,requestId()),tokenA).statusCode()); }
         finally { probe.failAfterMapper=null; } assertEquals(before,batchSnapshot(batch));
+    }
+
+    @Test void expansionAudioPreferencesAndListeningQuestionsHideSpellingAndMeaning() throws Exception {
+        var preference=call("PUT","/api/learning/settings/pronunciation",Map.of("autoPlay",true,"accent","UK","playbackRate",0.75,"repeatCount",2),tokenA);
+        assertEquals(200,preference.statusCode(),preference.body()); assertEquals("UK",data(preference).get("pronunciation").get("accent").asText());
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"LISTEN_DICTATION"); var q=trainingQuestion(batch,null);
+        for(String field:List.of("word","wordId","phonetic","translation")) assertFalse(q.hasNonNull(field),field);
+        assertFalse(q.get("hintUsed").asBoolean()); assertEquals(0.75,q.get("pronunciation").get("playbackRate").asDouble(),0.001);
+        var sound=download(q.get("audioUrl").asText(),tokenA); assertEquals(200,sound.statusCode());
+        assertEquals("audio/mpeg",sound.headers().firstValue("Content-Type").orElse("")); assertEquals(spelling(1),audioFixture.lastWord);
+        assertEquals(com.wordtrail.learning.dto.PronunciationRequest.Accent.UK,audioFixture.lastAccent);
+        assertEquals(404,download(q.get("audioUrl").asText(),tokenB).statusCode());
+        var answer=train(batch,q,spelling(1),null); assertEquals("RECALLED",answer.get("completionReason").asText()); assertFalse(answer.get("hintUsed").asBoolean());
+        assertEquals(409,download(q.get("audioUrl").asText(),tokenA).statusCode());
+        assertEquals("US",get("/api/learning/settings",tokenB).get("pronunciation").get("accent").asText());
+    }
+
+    @Test void expansionListeningRevealRemainsAssistedAndInvalidPreferencesAreRejected() throws Exception {
+        for(var body:List.of(Map.of("autoPlay",true,"accent","US","playbackRate",2,"repeatCount",1),Map.of("autoPlay",true,"accent","UK","playbackRate",1,"repeatCount",0)))
+            assertEquals(400,call("PUT","/api/learning/settings/pronunciation",body,tokenA).statusCode());
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"LISTEN_DICTATION"); train(batch,trainingQuestion(batch,null),null,null);
+        var revealed=trainingQuestion(batch,null); assertEquals(spelling(1),revealed.get("word").asText());
+        assertEquals("ASSISTED",train(batch,revealed,spelling(1),null).get("completionReason").asText());
+        assertEquals(0,state(a,wordIds.get(1)).getReviewLevel());
+        assertEquals(1,trainingModeStatistics("LISTEN_DICTATION").get("hintedAnswerCount").asInt());
     }
 
     private String dictationPath(long batch) { return "/api/dictation/batches/"+batch; }

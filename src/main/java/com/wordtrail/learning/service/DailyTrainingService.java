@@ -71,16 +71,18 @@ public class DailyTrainingService {
             item.setStudyExtraTraining(extra);
         }
         // Persist exposure before returning a visible spelling; switching cannot turn copying into unprompted recall.
-        if(mode!=StudyMode.DICTATION) item.setStudyHintUsed(true);
+        if(!mode.recallInput()) item.setStudyHintUsed(true);
         save(item);
-        boolean spellingVisible=mode!=StudyMode.DICTATION || revealed;
-        String translation=mode==StudyMode.RECOGNITION && !revealed ? null : item.getStudyTranslation();
+        boolean spellingVisible=!mode.recallInput() || revealed;
+        String translation=(mode==StudyMode.RECOGNITION || mode==StudyMode.LISTEN_DICTATION) && !revealed ? null : item.getStudyTranslation();
         if(mode==StudyMode.DICTATION && !revealed) translation=DictationPolicy.prompt(translation,item.getStudyWord());
         String phase=mode==StudyMode.RECOGNITION?(revealed?"AWAITING_SELF_ASSESSMENT":"QUESTION"):"AWAITING_INPUT";
+        String audioUrl="/api/learning-batches/"+batchId+"/training/items/"+id+"/audio?presentationId="
+            +item.getStudyPresentationId()+"&modeVersion="+batch.getModeVersion();
         return new TrainingQuestionVO(id,mode,batch.getModeVersion(),item.getStudyPresentationId(),item.getStudyAttemptCount()+1,
             spellingVisible?item.getWordId():null,spellingVisible?item.getStudyWord():null,
             spellingVisible?item.getStudyPhonetic():null,translation,item.getStudyHintUsed(),extra,revealed,phase,
-            item.getLearningStatus(),item.getCompletionReason(),daily.view(batch,entries));
+            item.getLearningStatus(),item.getCompletionReason(),daily.view(batch,entries),audioUrl,settings.pronunciation(userId));
     }
 
     @Transactional

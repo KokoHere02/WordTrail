@@ -225,7 +225,7 @@ public class DailyLearningService {
         var before=snapshot(state,request.attemptNo(),remaining);
         boolean schedule=item.getAnswerCount()==0;
         if(schedule) {
-            int schedulingResult=mode==StudyMode.FOLLOW_TYPING || (mode==StudyMode.DICTATION && hinted) ? 2 : request.result();
+            int schedulingResult=mode==StudyMode.FOLLOW_TYPING || (mode.recallInput() && hinted) ? 2 : request.result();
             applySchedule(state,before,schedulingResult,batch.getLearningDate());
         } else if(mode!=StudyMode.RECOGNITION && (mode==StudyMode.FOLLOW_TYPING || hinted || request.result()!=1)
                 && state.getNextReviewAt()!=null && state.getNextReviewAt().isAfter(batch.getLearningDate().plusDays(1).atStartOfDay())) {
@@ -313,7 +313,7 @@ public class DailyLearningService {
         item.setReinforcementRemaining(outcome.remaining()); item.setCompletionReason(outcome.completionReason());
         boolean done=outcome.done() || mode==StudyMode.FOLLOW_TYPING;
         if(mode==StudyMode.FOLLOW_TYPING) { item.setCompletionReason("FOLLOW_TYPED"); item.setReinforcementRemaining(0); }
-        else if(mode==StudyMode.DICTATION && hinted && result==2) {
+        else if(mode.recallInput() && hinted && result==2) {
             done=true; item.setCompletionReason("ASSISTED"); item.setReinforcementRemaining(0);
         }
         item.setLearningStatus(done?"DONE":"RELEARNING"); item.setCompletedAt(done?now:null);

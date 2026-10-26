@@ -8,4 +8,4 @@ import com.wordtrail.word.vo.TranslatedWord;
 public record TrainingQuestionVO(Long itemId, StudyMode mode, long modeVersion, String presentationId,
         int attemptNo, Long wordId, String word, String phonetic, String translation,
         boolean hintUsed, boolean extraTraining, boolean answerRevealed, String phase,
-        String itemStatus, String completionReason, DailyTaskVO progress) implements TranslatedWord {}
+        String itemStatus, String completionReason, DailyTaskVO progress,String audioUrl,PronunciationVO pronunciation) implements TranslatedWord {}
