@@ -59,13 +59,21 @@ public class DailyLearningService {
         long userId=currentUser.id(); var now=context.now(); var batch=todayBatch(userId, now.toLocalDate(), false);
         int target=batch==null ? settings.dailyTarget(userId) : batch.getDailyTarget();
         var entries=batch==null ? List.<LearningBatchItem>of() : context.entries(batch.getId());
-        long unassigned=states.selectCountByQuery(excluding(due(userId,now),entries))
-            +states.selectCountByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries));
+        long backlog=states.selectCountByQuery(excluding(due(userId,now),entries));
+        long pendingNew=states.selectCountByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries));
+        long unassigned=backlog+pendingNew;
+        var allocation=batch==null?settings.allocation(userId):null;
+        Integer newTarget=batch==null?(allocation==null?null:allocation.getNewWordTarget()):batch.getNewWordTarget();
+        Integer reviewLimit=batch==null?(allocation==null?null:allocation.getReviewLimit()):batch.getReviewLimit();
+        boolean capacity=newTarget==null?unassigned>0:
+            backlog>0 && entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count()<reviewLimit
+            || pendingNew>0 && entries.stream().filter(i->"NEW".equals(i.getItemType())).count()<newTarget;
         return new TodayVO(now.toLocalDate(), target, states.selectCountByQuery(active(userId)),
             states.selectCountByQuery(due(userId, now)),
             states.selectCountByQuery(active(userId).and(column("first_learned_at").isNull())),
-            unassigned,batch!=null && "COMPLETED".equals(batch.getStatus()) && unassigned>0,
-            batch==null ? null : view(batch, entries));
+            unassigned,batch!=null && "COMPLETED".equals(batch.getStatus()) && capacity,
+            batch==null ? null : view(batch, entries),backlog,
+            states.selectCountByQuery(due(userId,now).and(column("next_review_at").lt(now.toLocalDate().atStartOfDay()))),newTarget,reviewLimit);
     }
 
     @Transactional
@@ -76,19 +84,22 @@ public class DailyLearningService {
         if(existing!=null) {
             var entries=context.entries(existing.getId());
             if(!"COMPLETED".equals(existing.getStatus())) { return view(existing,entries); }
-            var selection=selectWords(userId,now,existing.getDailyTarget(),entries);
+            var selection=selectWords(userId,now,existing.getDailyTarget(),entries,existing.getNewWordTarget(),existing.getReviewLimit());
             if(selection.words().isEmpty()) { return view(existing,entries); }
             appendItems(existing,entries,selection);
             updateBatch(existing,entries,now);
             return view(existing,entries);
         }
         int target=settings.dailyTarget(userId);
-        var selection=selectWords(userId,now,target,List.of());
+        var allocation=settings.allocation(userId);
+        Integer newTarget=allocation==null?null:allocation.getNewWordTarget(),reviewLimit=allocation==null?null:allocation.getReviewLimit();
+        var selection=selectWords(userId,now,target,List.of(),newTarget,reviewLimit);
         if(selection.words().isEmpty()) { throw conflict("NO_DAILY_WORDS", "今日没有到期复习词或待学新词"); }
         var batch=new LearningBatch(); batch.setUserId(userId); batch.setTaskType("DAILY");
         batch.setSelectionType("DAILY"); batch.setStatus("IN_PROGRESS"); batch.setLearningDate(date);
         batch.setDailyTarget(target); batch.setCreatedAt(now); batch.setUpdatedAt(now);
         batch.setStudyMode(settings.preferredMode(userId)); batch.setModeVersion(0L);
+        batch.setNewWordTarget(newTarget); batch.setReviewLimit(reviewLimit);
         try {
             if(batches.insertSelective(batch)!=1) { throw new IllegalStateException("Could not create daily task"); }
         } catch(DuplicateKeyException ex) {
@@ -106,13 +117,15 @@ public class DailyLearningService {
         return query;
     }
     private record Selection(List<UserWordState> words,int reviews) {}
-    private Selection selectWords(long userId,LocalDateTime now,int limit,List<LearningBatchItem> entries) {
-        var selected=new ArrayList<>(states.selectListByQuery(excluding(due(userId,now),entries)
-            .orderBy(column("next_review_at").asc(),column("id").asc()).limit(limit)));
+    private Selection selectWords(long userId,LocalDateTime now,int limit,List<LearningBatchItem> entries,Integer newTarget,Integer reviewLimit) {
+        int reviewsAllowed=reviewLimit==null?limit:Math.max(0,reviewLimit-(int)entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count());
+        var selected=reviewsAllowed==0?new ArrayList<UserWordState>():new ArrayList<>(states.selectListByQuery(excluding(due(userId,now),entries)
+            .orderBy(column("next_review_at").asc(),column("id").asc()).limit(reviewsAllowed)));
         int reviews=selected.size();
-        if(reviews<limit) {
+        int newAllowed=newTarget==null?limit-reviews:Math.max(0,newTarget-(int)entries.stream().filter(i->"NEW".equals(i.getItemType())).count());
+        if(newAllowed>0) {
             selected.addAll(states.selectListByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries)
-                .orderBy(column("joined_at").asc(),column("id").asc()).limit(limit-reviews)));
+                .orderBy(column("joined_at").asc(),column("id").asc()).limit(newAllowed)));
         }
         return new Selection(selected,reviews);
     }
@@ -293,7 +306,7 @@ public class DailyLearningService {
     private void applyFeedback(LearningBatchItem item,List<LearningBatchItem> entries,int result,LocalDateTime now,int remainingBefore) {
         applyFeedback(item,entries,result,now,remainingBefore,StudyMode.RECOGNITION,false);
     }
-    private void applyFeedback(LearningBatchItem item,List<LearningBatchItem> entries,int result,LocalDateTime now,int remainingBefore,
+    void applyFeedback(LearningBatchItem item,List<LearningBatchItem> entries,int result,LocalDateTime now,int remainingBefore,
             StudyMode mode,boolean hinted) {
         item.setResult(result); item.setAnsweredAt(now);
         var outcome=reinforcement.feedback(remainingBefore,item.getAnswerCount(),result);
@@ -315,7 +328,7 @@ public class DailyLearningService {
             throw new IllegalStateException("Could not persist daily feedback");
         }
     }
-    private void updateBatch(LearningBatch batch,List<LearningBatchItem> entries,LocalDateTime now) {
+    void updateBatch(LearningBatch batch,List<LearningBatchItem> entries,LocalDateTime now) {
         boolean done=next(entries)==null;
         String status=done?"COMPLETED":"IN_PROGRESS";
         if(!status.equals(batch.getStatus())) {
@@ -348,7 +361,7 @@ public class DailyLearningService {
         return today.equals(batch.getLearningDate()) && "IN_PROGRESS".equals(batch.getStatus());
     }
     private DailyTaskVO view(LearningBatch batch,List<LearningBatchItem> entries,boolean actionable) {
-        return new DailyTaskVO(batch.getId(),batch.getLearningDate(),batch.getDailyTarget(),batch.getTaskType(),batch.getStatus(),entries.size(),
+        return new DailyTaskVO(batch.getId(),batch.getLearningDate(),batch.getDailyTarget()==null?0:batch.getDailyTarget(),batch.getTaskType(),batch.getStatus(),entries.size(),
             entries.stream().filter(i->"DONE".equals(i.getLearningStatus())).count(),
             entries.stream().filter(i->"SKIPPED".equals(i.getLearningStatus())).count(),
             entries.stream().mapToLong(LearningBatchItem::getAnswerCount).sum(),
@@ -357,7 +370,8 @@ public class DailyLearningService {
                     || "ASSISTED".equals(i.getCompletionReason()))).count(),
             entries.stream().filter(i->"NEW".equals(i.getItemType())).count(),
             entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count(),actionable?next(entries):null,
-            batch.getStudyMode(),batch.getModeVersion(),entries.stream().mapToLong(LearningBatchItem::getStudyAttemptCount).sum());
+            batch.getStudyMode(),batch.getModeVersion(),entries.stream().mapToLong(LearningBatchItem::getStudyAttemptCount).sum(),
+            batch.getNewWordTarget(),batch.getReviewLimit());
     }
     private DailyAnswerVO answerView(WordReviewLog event,LearningBatch batch,List<LearningBatchItem> entries) {
         var word=words.selectOneById(event.getWordId());

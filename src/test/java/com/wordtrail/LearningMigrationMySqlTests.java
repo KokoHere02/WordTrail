@@ -232,6 +232,32 @@ class LearningMigrationMySqlTests {
                 assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,
                     ()->run(second,new ClassPathResource("db/011_unified_daily_training.sql").getContentAsString(StandardCharsets.UTF_8)));
             }
+            var beforeTwelve=history(c);
+            var oldSettings=rows(c,"SELECT user_id,daily_target,preferred_study_mode,created_at,updated_at FROM user_learning_setting ORDER BY user_id");
+            var oldFeedback=rows(c,"SELECT * FROM word_review_log ORDER BY id");
+            var oldTraining=rows(c,"SELECT * FROM word_training_attempt ORDER BY id");
+            var oldMemory=rows(c,"SELECT * FROM user_word_state ORDER BY id");
+            run(c,new ClassPathResource("db/012_learning_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            run(c,new ClassPathResource("db/012_consolidation_allocation_audio.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeTwelve,history(c)); assertEquals(oldFeedback,rows(c,"SELECT * FROM word_review_log ORDER BY id"));
+            assertEquals(oldTraining,rows(c,"SELECT * FROM word_training_attempt ORDER BY id"));
+            assertEquals(oldMemory,rows(c,"SELECT * FROM user_word_state ORDER BY id"));
+            assertEquals(oldSettings,rows(c,"SELECT user_id,daily_target,preferred_study_mode,created_at,updated_at FROM user_learning_setting ORDER BY user_id"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM user_learning_setting WHERE new_word_target IS NOT NULL OR review_limit IS NOT NULL OR audio_accent<>'US' OR audio_playback_rate<>1 OR audio_repeat_count<>1 OR audio_auto_play<>0"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM learning_batch WHERE new_word_target IS NOT NULL OR review_limit IS NOT NULL OR creation_request_id IS NOT NULL"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE user_learning_setting SET new_word_target=1 WHERE user_id=1"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE user_learning_setting SET audio_accent='GB' WHERE user_id=1"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE user_learning_setting SET audio_playback_rate=2 WHERE user_id=1"));
+            run(c,"UPDATE user_learning_setting SET daily_target=3,new_word_target=1,review_limit=2,audio_accent='UK',audio_playback_rate=0.75,audio_repeat_count=2 WHERE user_id=1");
+            run(c,"UPDATE learning_batch SET study_mode='LISTEN_DICTATION' WHERE id=2");
+            run(c,"INSERT INTO learning_batch(id,user_id,selection_type,task_type,practice_mode,study_mode,creation_request_id,creation_fingerprint) VALUES(5000,1,'MANUAL','PRACTICE','CONSOLIDATION','LISTEN_DICTATION','migration_focus_request',REPEAT('f',64))");
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"INSERT INTO learning_batch(user_id,selection_type,practice_mode) VALUES(1,'MANUAL','CONSOLIDATION')"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"INSERT INTO learning_batch(user_id,selection_type,practice_mode,creation_request_id,creation_fingerprint) VALUES(1,'MANUAL','CONSOLIDATION','migration_focus_request',REPEAT('f',64))"));
+            run(c,new ClassPathResource("db/012_learning_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(second,new ClassPathResource("db/012_consolidation_allocation_audio.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
         }
         // Keep the isolated schema for subsequent real-MySQL HTTP tests and manual inspection.
     }

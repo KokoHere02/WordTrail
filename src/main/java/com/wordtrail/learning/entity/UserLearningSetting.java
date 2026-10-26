@@ -14,6 +14,12 @@ public class UserLearningSetting {
     private Long userId;
     private Integer dailyTarget;
     private String preferredStudyMode;
+    private Integer newWordTarget;
+    private Integer reviewLimit;
+    private Boolean audioAutoPlay;
+    private String audioAccent;
+    private java.math.BigDecimal audioPlaybackRate;
+    private Integer audioRepeatCount;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

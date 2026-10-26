@@ -25,4 +25,9 @@ public class LearningBatch {
     private Integer dailyTarget;
     private String studyMode;
     private Long modeVersion;
+    private Integer newWordTarget;
+    private Integer reviewLimit;
+    private String creationRequestId;
+    private String creationFingerprint;
+    private String consolidationReason;
 }

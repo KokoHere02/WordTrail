@@ -3909,6 +3909,34 @@ class LearningIntegrationTests {
         assertFalse(insightSummary("DAILY").get("coverage").get("statisticsComplete").asBoolean());
     }
 
+    private JsonNode allocation(int newWords,int reviews) throws Exception {
+        var response=call("PUT","/api/learning/settings/allocation",Map.of("newWordTarget",newWords,"reviewLimit",reviews),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
+    @Test void expansionAllocationReservesNewWordsAndCapsReviewBacklogForTheWholeDay() throws Exception {
+        joinPlan(wordIds.get(0),wordIds.get(1),wordIds.get(2),wordIds.get(3));
+        for(int index=0;index<2;index++) { var value=state(a,wordIds.get(index)); value.setFirstLearnedAt(statisticsDate().minusDays(3).atStartOfDay()); value.setNextReviewAt(statisticsDate().minusDays(2-index).atStartOfDay()); states.update(value); }
+        var preference=allocation(1,1); assertEquals(2,preference.get("dailyTarget").asInt());
+        var task=startDay(); long batch=task.get("batchId").asLong(); assertEquals(1,task.get("newCount").asInt()); assertEquals(1,task.get("reviewCount").asInt());
+        assertEquals(1,task.get("newWordTarget").asInt()); assertEquals(1,task.get("reviewLimit").asInt());
+        while(!get(dailyPath(batch),tokenA).get("nextItemId").isNull()) { var q=trainingQuestion(batch,null); train(batch,q,null,1); }
+        var today=get("/api/learning/today",tokenA); assertFalse(today.get("canAddMore").asBoolean()); assertEquals(1,today.get("reviewBacklogCount").asInt());
+        assertEquals(1,today.get("overdueReviewCount").asInt()); assertEquals(2,startDay().get("totalCount").asInt());
+        allocation(2,2); assertEquals(1,get(dailyPath(batch),tokenA).get("newWordTarget").asInt());
+        advanceDays(1); var tomorrow=startDay(); assertEquals(2,tomorrow.get("newWordTarget").asInt()); assertEquals(2,tomorrow.get("reviewLimit").asInt());
+    }
+
+    @Test void expansionZeroReviewQuotaAndLegacyTargetUpdatesRemainCompatibleAndPrivate() throws Exception {
+        joinPlan(wordIds.get(0),wordIds.get(1)); var old=state(a,wordIds.get(0)); old.setFirstLearnedAt(statisticsDate().minusDays(1).atStartOfDay()); old.setNextReviewAt(statisticsDate().atStartOfDay()); states.update(old);
+        allocation(1,0); var task=startDay(); assertEquals(0,task.get("reviewCount").asInt()); assertEquals(1,task.get("newCount").asInt());
+        assertEquals(400,call("PUT","/api/learning/settings/allocation",Map.of("newWordTarget",0,"reviewLimit",0),tokenA).statusCode());
+        assertEquals(400,call("PUT","/api/learning/settings/allocation",Map.of("newWordTarget",150,"reviewLimit",100),tokenA).statusCode());
+        assertTrue(get("/api/learning/settings",tokenB).get("newWordTarget").isNull());
+        var legacy=call("PUT","/api/learning/settings",Map.of("dailyTarget",20),tokenA); assertEquals(200,legacy.statusCode());
+        assertTrue(data(legacy).get("newWordTarget").isNull()); assertTrue(data(legacy).get("reviewLimit").isNull());
+        assertEquals(1,get(dailyPath(task.get("batchId").asLong()),tokenA).get("newWordTarget").asInt());
+    }
+
     private String dictationPath(long batch) { return "/api/dictation/batches/"+batch; }
     private JsonNode createDictation(Object request) throws Exception {
         var response=call("POST","/api/dictation/batches",request,tokenA);

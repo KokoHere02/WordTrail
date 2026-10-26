@@ -36,7 +36,7 @@ class DatabaseSchemaVerifierTests {
         var jdbc=schema(true); jdbc.execute("DROP TABLE word_training_attempt");
         runner(database).run(context->{
             assertNotNull(context.getStartupFailure()); String message=context.getStartupFailure().getMessage();
-            assertTrue(message.contains("word_training_attempt")); assertTrue(message.contains("011"));
+            assertTrue(message.contains("word_training_attempt")); assertTrue(message.contains("012"));
         });
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_name='WORD_TRAINING_ATTEMPT'",Integer.class));
     }
