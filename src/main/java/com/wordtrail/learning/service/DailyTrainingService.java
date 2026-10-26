@@ -31,25 +31,33 @@ public class DailyTrainingService {
 
     @Transactional
     public DailyTaskVO mode(long batchId,StudyModeRequest request) {
+        return mode(batchId,request,false);
+    }
+    @Transactional public DailyTaskVO consolidationMode(long batchId,StudyModeRequest request) { return mode(batchId,request,true); }
+    private DailyTaskVO mode(long batchId,StudyModeRequest request,boolean consolidation) {
         long userId=currentUser.id(); context.lockUser(userId);
-        var batch=daily.daily(userId,batchId,true,context.today());
+        var batch=batch(userId,batchId,true,context.today(),consolidation);
         if(!batch.getModeVersion().equals(request.expectedVersion())) throw conflict("STALE_STUDY_MODE","学习方式已变化，请刷新任务");
         if(!batch.getStudyMode().equals(request.mode().name())) {
             batch.setStudyMode(request.mode().name()); batch.setModeVersion(Math.addExact(batch.getModeVersion(),1));
             batch.setUpdatedAt(context.now());
             if(batches.update(batch)!=1) throw new IllegalStateException("Could not switch study mode");
         }
-        settings.rememberMode(userId,batch.getStudyMode());
+        if(!consolidation) settings.rememberMode(userId,batch.getStudyMode());
         return daily.view(batch,context.entries(batchId));
     }
 
     @Transactional
     public TrainingQuestionVO next(long batchId,TrainingQuestionRequest request) {
+        return next(batchId,request,false);
+    }
+    @Transactional public TrainingQuestionVO consolidationNext(long batchId,TrainingQuestionRequest request) { return next(batchId,request,true); }
+    private TrainingQuestionVO next(long batchId,TrainingQuestionRequest request,boolean consolidation) {
         long userId=currentUser.id(); context.lockUser(userId);
-        var batch=daily.daily(userId,batchId,true,context.today()); var entries=context.entries(batchId);
+        var batch=batch(userId,batchId,true,context.today(),consolidation); var entries=context.entries(batchId);
         Long id=request==null || request.itemId()==null ? daily.next(entries) : request.itemId();
         if(id==null) throw conflict("NO_TRAINING_ITEM","本组已完成，可选择已完成的词追加训练");
-        var item=daily.find(entries,id); daily.availableState(userId,item);
+        var item=daily.find(entries,id); if(!consolidation) daily.availableState(userId,item);
         boolean extra="DONE".equals(item.getLearningStatus());
         if(!extra && !Objects.equals(daily.next(entries),id)) throw conflict("STALE_TRAINING_ITEM","请继续当前词或选择已完成的词追加训练");
         snapshot(item);
@@ -77,9 +85,13 @@ public class DailyTrainingService {
 
     @Transactional
     public TrainingAnswerVO answer(long batchId,long itemId,TrainingAnswerRequest request) {
+        return answer(batchId,itemId,request,false);
+    }
+    @Transactional public TrainingAnswerVO consolidationAnswer(long batchId,long itemId,TrainingAnswerRequest request) { return answer(batchId,itemId,request,true); }
+    private TrainingAnswerVO answer(long batchId,long itemId,TrainingAnswerRequest request,boolean consolidation) {
         long userId=currentUser.id(); context.lockUser(userId);
         var now=context.now();
-        var batch=daily.daily(userId,batchId,true,now.toLocalDate()); var entries=context.entries(batchId);
+        var batch=batch(userId,batchId,true,now.toLocalDate(),consolidation); var entries=context.entries(batchId);
         var item=daily.find(entries,itemId);
         var previous=attempts.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId)).and(column("request_id").eq(request.requestId())));
         if(previous!=null) {
@@ -90,10 +102,10 @@ public class DailyTrainingService {
                     || !previous.getAction().equals(request.action().name())
                     || !Objects.equals(previous.getInputText(),request.input())
                     || !Objects.equals(previous.getSelfAssessment(),request.result())) throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
-            return response(previous,item,daily.progress(batchId));
+            return response(previous,item,progress(batchId,consolidation));
         }
         if(events.findRequest(userId,request.requestId())!=null) throw conflict("REQUEST_ID_REUSED","请求标识已用于其他作答");
-        daily.availableState(userId,item);
+        if(!consolidation) daily.availableState(userId,item);
         if(!batch.getModeVersion().equals(request.modeVersion()) || !Objects.equals(item.getStudyPresentationVersion(),request.modeVersion())
                 || !Objects.equals(item.getStudyPresentationId(),request.presentationId())
                 || request.attemptNo()!=item.getStudyAttemptCount()+1) throw conflict("STALE_TRAINING_ANSWER","题目、方式或作答次数已变化，请重新获取题目");
@@ -111,8 +123,15 @@ public class DailyTrainingService {
         // A reveal and an incorrect copy are training events, without completing a queue item.
         if(!extra && !reveal && (mode!=StudyMode.FOLLOW_TYPING || correct)) {
             int result=mode==StudyMode.RECOGNITION?request.result():mode==StudyMode.FOLLOW_TYPING?2:correct?(hinted?2:1):3;
-            var feedback=daily.answerInMode(batchId,itemId,new DailyAnswerRequest(result,request.requestId(),item.getAnswerCount()+1),mode,hinted,true,now);
-            logId=feedback.logId();
+            if(!consolidation) {
+                var feedback=daily.answerInMode(batchId,itemId,new DailyAnswerRequest(result,request.requestId(),item.getAnswerCount()+1),mode,hinted,true,now);
+                logId=feedback.logId();
+            } else {
+                if(item.getAnswerCount()>=DailyReinforcementPolicy.MAX_ANSWERS) throw conflict("STALE_TRAINING_ANSWER","本词已达到强化上限");
+                item.setAnswerCount(item.getAnswerCount()+1); item.setRelearnCount(Math.max(0,item.getAnswerCount()-1));
+                daily.applyFeedback(item,entries,result,now,Objects.requireNonNullElse(item.getReinforcementRemaining(),0),mode,hinted);
+                daily.updateBatch(batch,entries,now);
+            }
         }
         // Reload because effective feedback updates the same item and queue in this transaction.
         item=items.selectOneById(itemId);
@@ -127,7 +146,7 @@ public class DailyTrainingService {
         item.setStudyAttemptCount(request.attemptNo()); item.setStudyPresentationId(null); item.setStudyPresentationVersion(null);
         // Every response contains the reference answer, so subsequent dictation is assisted for this task.
         item.setStudyHintUsed(true); save(item);
-        return response(attempt,item,daily.progress(batchId));
+        return response(attempt,item,progress(batchId,consolidation));
     }
 
     private void validate(TrainingAnswerRequest request,StudyMode mode,boolean reveal) {
@@ -167,10 +186,15 @@ public class DailyTrainingService {
 
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public PageVO<DailyTrainingItemVO> listItems(long batchId,WordHistoryQuery query) {
-        var today=context.today(); var batch=daily.daily(currentUser.id(),batchId,false,null);
+        return listItems(batchId,query,false);
+    }
+    @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
+    public PageVO<DailyTrainingItemVO> consolidationItems(long batchId,WordHistoryQuery query) { return listItems(batchId,query,true); }
+    private PageVO<DailyTrainingItemVO> listItems(long batchId,WordHistoryQuery query,boolean consolidation) {
+        var today=context.today(); var batch=batch(currentUser.id(),batchId,false,null,consolidation);
         var page=items.paginate(query.getPage(),query.getSize(),QueryWrapper.create().where(column("batch_id").eq(batchId))
             .orderBy(column("sort_order").asc(),column("id").asc()));
-        var progress=daily.progress(batchId);
+        var progress=progress(batchId,consolidation);
         var doneIds=page.getRecords().stream().filter(i->"DONE".equals(i.getLearningStatus())).map(LearningBatchItem::getWordId).toList();
         var activeIds=doneIds.isEmpty()?Set.<Long>of():new HashSet<>(states.selectListByQuery(QueryWrapper.create()
             .where(column("user_id").eq(currentUser.id())).and(column("plan_status").eq("ACTIVE"))
@@ -184,7 +208,7 @@ public class DailyTrainingService {
             boolean done="DONE".equals(item.getLearningStatus());
             // Only already completed items expose dictionary identities/answers in a list.
             // Showing any pending spelling here would bypass persisted exposure tracking.
-            boolean actionable=done && today.equals(batch.getLearningDate()) && activeIds.contains(item.getWordId());
+            boolean actionable=done && (consolidation || today.equals(batch.getLearningDate()) && activeIds.contains(item.getWordId()));
             var legacy=legacyWords.get(item.getWordId());
             return new DailyTrainingItemVO(item.getId(),done?item.getWordId():null,
                 done?(legacy==null?item.getStudyWord():legacy.getWord()):null,
@@ -198,13 +222,32 @@ public class DailyTrainingService {
 
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public PageVO<TrainingAnswerVO> history(long batchId,WordHistoryQuery query) {
-        daily.daily(currentUser.id(),batchId,false,null); var entries=context.entries(batchId);
+        return history(batchId,query,false);
+    }
+    @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
+    public PageVO<TrainingAnswerVO> consolidationHistory(long batchId,WordHistoryQuery query) { return history(batchId,query,true); }
+    private PageVO<TrainingAnswerVO> history(long batchId,WordHistoryQuery query,boolean consolidation) {
+        batch(currentUser.id(),batchId,false,null,consolidation); var entries=context.entries(batchId);
         var page=attempts.paginate(query.getPage(),query.getSize(),QueryWrapper.create().where(column("user_id").eq(currentUser.id()))
             .and(column("batch_id").eq(batchId)).orderBy(column("id").desc()));
-        var progress=daily.progress(batchId);
+        var progress=progress(batchId,consolidation);
         return new PageVO<>(query.getPage(),query.getSize(),page.getTotalRow(),page.getRecords().stream()
             .map(a->response(a,daily.find(entries,a.getBatchItemId()),progress)).toList());
     }
+
+    private LearningBatch batch(long userId,long batchId,boolean lock,java.time.LocalDate date,boolean consolidation) {
+        if(!consolidation) return daily.daily(userId,batchId,lock,date);
+        var batch=context.ownedBatch(userId,batchId,lock);
+        if(!"PRACTICE".equals(batch.getTaskType()) || !"CONSOLIDATION".equals(batch.getPracticeMode())) throw conflict("NOT_CONSOLIDATION_TASK","请使用该任务原有接口");
+        if("ABANDONED".equals(batch.getStatus())) throw conflict("BATCH_ABANDONED","该练习已放弃");
+        return batch;
+    }
+    private DailyTaskVO progress(long batchId,boolean consolidation) {
+        if(!consolidation) return daily.progress(batchId);
+        return daily.view(batch(currentUser.id(),batchId,false,null,true),context.entries(batchId));
+    }
+    @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
+    public DailyTaskVO consolidationProgress(long batchId) { return progress(batchId,true); }
 
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public TrainingStatisticsVO statistics(StatisticsDateQuery query) {

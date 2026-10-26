@@ -25,7 +25,8 @@ public interface WordTrainingAttemptMapper extends BaseMapper<WordTrainingAttemp
             CASE WHEN t.self_assessment IS NULL THEN NULL ELSE COALESCE(
               (SELECT c.result FROM word_review_log c WHERE c.corrects_log_id=t.review_log_id AND c.user_id=t.user_id
                 AND c.event_type='CORRECTION' ORDER BY c.id DESC LIMIT 1),t.self_assessment) END AS self_assessment
-          FROM word_training_attempt t WHERE t.user_id=#{userId} AND t.learning_date=#{date}
+          FROM word_training_attempt t JOIN learning_batch b ON b.id=t.batch_id AND b.user_id=t.user_id
+          WHERE t.user_id=#{userId} AND t.learning_date=#{date} AND b.task_type='DAILY'
           UNION ALL
           SELECT 'RECOGNITION','ANSWER','SELF_ASSESSED',FALSE,
             COALESCE((SELECT c.result FROM word_review_log c WHERE c.corrects_log_id=l.id AND c.user_id=l.user_id

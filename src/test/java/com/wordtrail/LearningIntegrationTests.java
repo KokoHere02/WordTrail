@@ -3913,6 +3913,19 @@ class LearningIntegrationTests {
         var response=call("PUT","/api/learning/settings/allocation",Map.of("newWordTarget",newWords,"reviewLimit",reviews),tokenA);
         assertEquals(200,response.statusCode(),response.body()); return data(response);
     }
+    private JsonNode consolidationIssues(String query) throws Exception { return get("/api/learning/consolidation/issues"+query,tokenA); }
+    private JsonNode focusCreate(Object body) throws Exception {
+        var response=call("POST","/api/learning/consolidation/batches",body,tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
+    private String focusPath(long batch) { return "/api/learning/consolidation/batches/"+batch; }
+    private JsonNode focusNext(long batch) throws Exception {
+        var response=call("POST",focusPath(batch)+"/next",null,tokenA); assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
+    private JsonNode focusAnswer(long batch,JsonNode question,String input,Integer result) throws Exception {
+        var response=call("PUT",focusPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer",trainingBody(question,input,result,requestId()),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
     @Test void expansionAllocationReservesNewWordsAndCapsReviewBacklogForTheWholeDay() throws Exception {
         joinPlan(wordIds.get(0),wordIds.get(1),wordIds.get(2),wordIds.get(3));
         for(int index=0;index<2;index++) { var value=state(a,wordIds.get(index)); value.setFirstLearnedAt(statisticsDate().minusDays(3).atStartOfDay()); value.setNextReviewAt(statisticsDate().minusDays(2-index).atStartOfDay()); states.update(value); }
@@ -3935,6 +3948,71 @@ class LearningIntegrationTests {
         var legacy=call("PUT","/api/learning/settings",Map.of("dailyTarget",20),tokenA); assertEquals(200,legacy.statusCode());
         assertTrue(data(legacy).get("newWordTarget").isNull()); assertTrue(data(legacy).get("reviewLimit").isNull());
         assertEquals(1,get(dailyPath(task.get("batchId").asLong()),tokenA).get("newWordTarget").asInt());
+    }
+
+    @Test void expansionWrongReasonsShowActualSpellingAndCopyingIsOnlyPendingVerification() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+        train(batch,trainingQuestion(batch,null),spelling(1),null);
+        assertEquals(0,consolidationIssues("").get("total").asInt());
+        var pending=consolidationIssues("?reason=PENDING_VERIFICATION"); assertEquals(1,pending.get("total").asInt());
+        assertEquals("VERIFICATION",pending.get("records").get(0).get("category").asText());
+        joinPlan(wordIds.get(2)); startDay(); studyMode(batch,"DICTATION"); var q=trainingQuestion(batch,null);
+        train(batch,q,"misspelled",null); var errors=consolidationIssues("?reason=SPELLING_ERROR"); assertEquals(1,errors.get("total").asInt());
+        assertEquals("misspelled",errors.get("records").get(0).get("lastInput").asText()); assertEquals(spelling(2),errors.get("records").get(0).get("word").asText());
+        assertEquals(0,get("/api/learning/consolidation/issues?category=ALL",tokenB).get("total").asInt());
+    }
+
+    @Test void expansionRevealsUnknownAndAttemptLimitAreSeparateAndCorrectionsAreHonored() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); var q=trainingQuestion(batch,null); train(batch,q,null,null);
+        assertEquals(0,consolidationIssues("?reason=ANSWER_REVEALED").get("total").asInt());
+        var answer=train(batch,trainingQuestion(batch,null),null,3);
+        assertEquals(1,consolidationIssues("?reason=UNRECOGNIZED").get("total").asInt());
+        correction(batch,q.get("itemId").asLong(),answer.get("reviewLogId").asLong(),1,requestId());
+        assertEquals(0,consolidationIssues("?reason=UNRECOGNIZED").get("total").asInt());
+        correction(batch,q.get("itemId").asLong(),answer.get("reviewLogId").asLong(),3,requestId());
+        studyMode(batch,"DICTATION"); for(int index=0;index<5;index++) train(batch,trainingQuestion(batch,null),"wrong",null);
+        assertEquals(1,consolidationIssues("?reason=ATTEMPT_LIMIT").get("total").asInt());
+        assertEquals(5,consolidationIssues("?reason=SPELLING_ERROR").get("records").get(0).get("occurrenceCount").asInt());
+    }
+
+    @Test void expansionFocusedPracticeResolvesSpellingWithoutChangingDailyGoalOrSchedule() throws Exception {
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); studyMode(daily,"DICTATION"); train(daily,trainingQuestion(daily,null),"wrong",null);
+        String memory=stateSnapshot(),queue=batchSnapshot(daily); var oldStats=get("/api/learning/statistics/training",tokenA);
+        String key=requestId(); var body=Map.of("requestId",key,"reason","SPELLING_ERROR","mode","DICTATION");
+        var created=focusCreate(body); long batch=created.get("batchId").asLong(); assertEquals("PRACTICE",created.get("taskType").asText());
+        assertEquals(batch,focusCreate(body).get("batchId").asLong()); assertEquals(0,created.get("dailyTarget").asInt());
+        var q=focusNext(batch); assertFalse(q.hasNonNull("word")); var correct=focusAnswer(batch,q,spelling(1),null);
+        assertEquals("RECALLED",correct.get("completionReason").asText()); assertFalse(correct.get("affectsSchedule").asBoolean());
+        assertEquals(0,consolidationIssues("?reason=SPELLING_ERROR").get("total").asInt());
+        assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(daily)); assertEquals(oldStats,get("/api/learning/statistics/training",tokenA));
+        assertEquals(1,get("/api/learning/consolidation/batches?status=COMPLETED",tokenA).get("total").asInt());
+        assertEquals(409,call("POST","/api/learning/consolidation/batches",Map.of("requestId",key,"mode","FOLLOW_TYPING"),tokenA).statusCode());
+    }
+
+    @Test void expansionFocusedPracticePersistsHintsAndRejectsCrossUserAndCrossFamilyRequests() throws Exception {
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); studyMode(daily,"DICTATION"); train(daily,trainingQuestion(daily,null),"wrong",null);
+        long batch=focusCreate(Map.of("requestId",requestId(),"wordIds",List.of(wordIds.get(1)),"mode","DICTATION")).get("batchId").asLong();
+        var q=focusNext(batch); focusAnswer(batch,q,null,null);
+        assertEquals(1,consolidationIssues("?reason=ANSWER_REVEALED").get("total").asInt());
+        var resumed=focusNext(batch); assertTrue(resumed.get("answerRevealed").asBoolean());
+        assertEquals(spelling(1),resumed.get("word").asText()); advanceDays(1); resumed=focusNext(batch);
+        var answer=focusAnswer(batch,resumed,spelling(1),null); assertEquals("ASSISTED",answer.get("completionReason").asText());
+        assertEquals(1,consolidationIssues("?reason=SPELLING_ERROR").get("total").asInt());
+        assertEquals(404,call("GET",focusPath(batch),null,tokenB).statusCode());
+        assertEquals(409,call("POST",dailyPath(batch)+"/training/next",null,tokenA).statusCode());
+        assertEquals(409,call("POST",focusPath(daily)+"/next",null,tokenA).statusCode());
+        assertEquals(409,call("POST","/api/learning/consolidation/batches",Map.of("requestId",requestId(),"wordIds",List.of(wordIds.get(2))),tokenA).statusCode());
+    }
+
+    @Test void expansionConsolidationCreationAndAnswersRollbackTogetherOnPersistenceFailure() throws Exception {
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); studyMode(daily,"DICTATION"); train(daily,trainingQuestion(daily,null),"wrong",null);
+        long count=countBatches(); probe.failAfterMapper="com.wordtrail.learning.mapper.LearningBatchItemMapper";
+        try { assertEquals(500,call("POST","/api/learning/consolidation/batches",Map.of("requestId",requestId()),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; } assertEquals(count,countBatches());
+        long batch=focusCreate(Map.of("requestId",requestId())).get("batchId").asLong(); var q=focusNext(batch); String before=batchSnapshot(batch);
+        probe.failAfterMapper="com.wordtrail.learning.mapper.WordTrainingAttemptMapper";
+        try { assertEquals(500,call("PUT",focusPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",trainingBody(q,spelling(1),null,requestId()),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; } assertEquals(before,batchSnapshot(batch));
     }
 
     private String dictationPath(long batch) { return "/api/dictation/batches/"+batch; }
