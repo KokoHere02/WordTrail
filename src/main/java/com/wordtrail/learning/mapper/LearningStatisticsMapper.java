@@ -39,6 +39,9 @@ public interface LearningStatisticsMapper extends BaseMapper<LearningBatchItem> 
         SELECT i.id AS item_id, i.word_id, b.learning_date, i.item_type, i.learning_status,i.completion_reason,
                COALESCE(activity.answer_count, 0) AS answer_count,
                COALESCE(activity.training_count, 0) AS training_count,
+               CASE WHEN i.completion_reason='FOLLOW_TYPED' THEN
+        """ + AssessmentSql.BEFORE_COPY + """
+                 ELSE COALESCE(i.result, c.result, original.result) END AS assessed_result,
                COALESCE(i.result, c.result, original.result) AS last_result,
                CASE WHEN COALESCE(activity.training_count, 0)>0 OR COALESCE(a.event_count, 0) > 0 OR i.answer_count > 0
                          OR i.result IS NOT NULL OR i.answered_at IS NOT NULL
@@ -76,7 +79,7 @@ public interface LearningStatisticsMapper extends BaseMapper<LearningBatchItem> 
                SUM(answer_count) AS answer_count,
                COUNT(DISTINCT CASE WHEN learning_status = 'DONE' AND item_type = 'NEW' THEN word_id END) AS new_completed_count,
                COUNT(DISTINCT CASE WHEN learning_status = 'DONE' AND item_type = 'REVIEW' THEN word_id END) AS review_completed_count,
-               COUNT(DISTINCT CASE WHEN studied = 1 AND last_result IN (2, 3) THEN word_id END) AS unfamiliar_count,
+               COUNT(DISTINCT CASE WHEN studied = 1 AND assessed_result IN (2, 3) THEN word_id END) AS unfamiliar_count,
                CASE WHEN MAX(studied) = 1 THEN TRUE ELSE FALSE END AS has_learning_activity,
                CASE WHEN MIN(statistics_complete) = 1 THEN TRUE ELSE FALSE END AS statistics_complete,
                COUNT(DISTINCT CASE WHEN statistics_complete = 0 THEN word_id END) AS incomplete_word_count,

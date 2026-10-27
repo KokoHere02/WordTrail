@@ -37,8 +37,8 @@ public class ConsolidationService {
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public List<ConsolidationMapper.ReasonCount> summary() {
         var found=new HashMap<String,ConsolidationMapper.ReasonCount>(); for(var value:issues.summary(currentUser.id())) found.put(value.reason(),value);
-        return Arrays.stream(ConsolidationQuery.Reason.values()).map(reason->found.getOrDefault(reason.name(),
-            new ConsolidationMapper.ReasonCount(reason.name(),reason==ConsolidationQuery.Reason.PENDING_VERIFICATION?"VERIFICATION":"ERROR",0))).toList();
+        return Arrays.stream(ConsolidationQuery.Reason.values()).filter(ConsolidationQuery.Reason::active)
+            .map(reason->found.getOrDefault(reason.name(),new ConsolidationMapper.ReasonCount(reason.name(),"ERROR",0))).toList();
     }
     @Transactional public DailyTaskVO create(CreateConsolidationRequest request) {
         long userId=currentUser.id(); context.lockUser(userId);

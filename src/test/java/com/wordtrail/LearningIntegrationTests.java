@@ -3965,12 +3965,17 @@ class LearningIntegrationTests {
         assertEquals(1,get(dailyPath(task.get("batchId").asLong()),tokenA).get("newWordTarget").asInt());
     }
 
-    @Test void expansionWrongReasonsShowActualSpellingAndCopyingIsOnlyPendingVerification() throws Exception {
+    @Test void expansionWrongReasonsShowActualSpellingAndCopyingCreatesNoIssue() throws Exception {
         joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
         train(batch,trainingQuestion(batch,null),spelling(1),null);
         assertEquals(0,consolidationIssues("").get("total").asInt());
-        var pending=consolidationIssues("?reason=PENDING_VERIFICATION"); assertEquals(1,pending.get("total").asInt());
-        assertEquals("VERIFICATION",pending.get("records").get(0).get("category").asText());
+        assertEquals(0,consolidationIssues("?reason=PENDING_VERIFICATION").get("total").asInt());
+        assertEquals(0,consolidationIssues("?category=ALL").get("total").asInt());
+        assertEquals(0,consolidationIssues("?category=VERIFICATION").get("total").asInt());
+        assertEquals(4,get("/api/learning/consolidation/summary",tokenA).size());
+        assertEquals(0,weakWords("DAILY").get("total").asInt());
+        assertEquals(0,get(dailyPath(batch),tokenA).get("unfamiliarCount").asInt());
+        assertEquals(0,statisticsDaily(statisticsDate()).get("unfamiliarCount").asInt());
         joinPlan(wordIds.get(2)); startDay(); studyMode(batch,"DICTATION"); var q=trainingQuestion(batch,null);
         train(batch,q,"misspelled",null); var errors=consolidationIssues("?reason=SPELLING_ERROR"); assertEquals(1,errors.get("total").asInt());
         assertEquals("misspelled",errors.get("records").get(0).get("lastInput").asText()); assertEquals(spelling(2),errors.get("records").get(0).get("word").asText());

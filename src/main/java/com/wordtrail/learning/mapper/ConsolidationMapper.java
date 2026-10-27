@@ -22,18 +22,16 @@ public interface ConsolidationMapper extends BaseMapper<WordTrainingAttempt> {
             WHERE mode IN ('DICTATION','LISTEN_DICTATION') AND action='ANSWER' AND verdict='INCORRECT'
           UNION ALL SELECT f.*,'ANSWER_REVEALED','ERROR' FROM facts f WHERE action='REVEAL' AND mode IN ('DICTATION','LISTEN_DICTATION')
           UNION ALL SELECT f.*,'UNRECOGNIZED','ERROR' FROM facts f WHERE mode='RECOGNITION' AND action='ANSWER' AND effective_self=3
-          UNION ALL SELECT f.*,'ATTEMPT_LIMIT','ERROR' FROM facts f WHERE completion_reason='LIMIT_REACHED' AND extra_training=FALSE
+          UNION ALL SELECT f.*,'ATTEMPT_LIMIT','ERROR' FROM facts f WHERE mode!='FOLLOW_TYPING' AND completion_reason='LIMIT_REACHED' AND extra_training=FALSE
             AND action='ANSWER' AND id=(SELECT MAX(x.id) FROM word_training_attempt x
               WHERE x.batch_item_id=f.batch_item_id AND x.user_id=f.user_id AND x.extra_training=FALSE AND x.action='ANSWER')
-          UNION ALL SELECT f.*,'PENDING_VERIFICATION','VERIFICATION' FROM facts f
-            WHERE mode='FOLLOW_TYPING' AND verdict='CORRECT' AND extra_training=FALSE AND completion_reason='FOLLOW_TYPED'
         ), ranked AS (
           SELECT r.*,ROW_NUMBER() OVER(PARTITION BY word_id,reason ORDER BY id DESC) AS issue_rank,
             COUNT(*) OVER(PARTITION BY word_id,reason) AS occurrence_count FROM reasons r
         ), open_issues AS (
           SELECT r.* FROM ranked r WHERE issue_rank=1 AND NOT EXISTS(
             SELECT 1 FROM facts p WHERE p.word_id=r.word_id AND p.id>r.id AND (
-              (r.reason IN ('SPELLING_ERROR','PENDING_VERIFICATION') AND p.mode IN ('DICTATION','LISTEN_DICTATION') AND p.verdict='CORRECT' AND p.hint_used=FALSE)
+              (r.reason='SPELLING_ERROR' AND p.mode IN ('DICTATION','LISTEN_DICTATION') AND p.verdict='CORRECT' AND p.hint_used=FALSE)
               OR (r.reason='UNRECOGNIZED' AND ((p.mode='RECOGNITION' AND p.effective_self=1) OR (p.mode='DICTATION' AND p.verdict='CORRECT' AND p.hint_used=FALSE)))
               OR (r.reason IN ('ANSWER_REVEALED','ATTEMPT_LIMIT') AND (
                 (r.mode='RECOGNITION' AND ((p.mode='RECOGNITION' AND p.effective_self=1) OR (p.mode='DICTATION' AND p.verdict='CORRECT' AND p.hint_used=FALSE)))

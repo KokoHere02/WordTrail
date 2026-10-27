@@ -32,13 +32,16 @@ public class DailyLearningService {
     private final ObjectMapper json;
     private final LearningSettingsService settings;
     private final DailyReinforcementPolicy reinforcement;
+    private final ReviewEvidenceMapper evidence;
 
     public DailyLearningService(CurrentUser currentUser, LearningContext context, LearningBatchMapper batches,
             LearningBatchItemMapper items, UserWordStateMapper states, WordMapper words, ReviewEvents events,
-            ReviewScheduler scheduler, ObjectMapper json, LearningSettingsService settings, DailyReinforcementPolicy reinforcement) {
+            ReviewScheduler scheduler, ObjectMapper json, LearningSettingsService settings, DailyReinforcementPolicy reinforcement,
+            ReviewEvidenceMapper evidence) {
         this.currentUser=currentUser; this.context=context; this.batches=batches; this.items=items;
         this.states=states; this.words=words; this.events=events; this.scheduler=scheduler; this.json=json; this.settings=settings;
         this.reinforcement=reinforcement;
+        this.evidence=evidence;
     }
 
     private QueryWrapper active(long userId) {
@@ -361,13 +364,16 @@ public class DailyLearningService {
         return today.equals(batch.getLearningDate()) && "IN_PROGRESS".equals(batch.getStatus());
     }
     private DailyTaskVO view(LearningBatch batch,List<LearningBatchItem> entries,boolean actionable) {
+        long copiedUnfamiliar=entries.stream().anyMatch(i->"FOLLOW_TYPED".equals(i.getCompletionReason()))
+            ? evidence.copiedUnfamiliarCount(batch.getUserId(),batch.getId()) : 0;
         return new DailyTaskVO(batch.getId(),batch.getLearningDate(),batch.getDailyTarget()==null?0:batch.getDailyTarget(),batch.getTaskType(),batch.getStatus(),entries.size(),
             entries.stream().filter(i->"DONE".equals(i.getLearningStatus())).count(),
             entries.stream().filter(i->"SKIPPED".equals(i.getLearningStatus())).count(),
             entries.stream().mapToLong(LearningBatchItem::getAnswerCount).sum(),
             entries.stream().filter(i->"DONE".equals(i.getLearningStatus())
+                && !"FOLLOW_TYPED".equals(i.getCompletionReason())
                 && (!Objects.equals(i.getResult(),1) || "LIMIT_REACHED".equals(i.getCompletionReason())
-                    || "ASSISTED".equals(i.getCompletionReason()))).count(),
+                    || "ASSISTED".equals(i.getCompletionReason()))).count()+copiedUnfamiliar,
             entries.stream().filter(i->"NEW".equals(i.getItemType())).count(),
             entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count(),actionable?next(entries):null,
             batch.getStudyMode(),batch.getModeVersion(),entries.stream().mapToLong(LearningBatchItem::getStudyAttemptCount).sum(),

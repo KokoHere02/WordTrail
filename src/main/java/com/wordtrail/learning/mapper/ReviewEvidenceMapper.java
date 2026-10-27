@@ -30,7 +30,7 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
         WHERE a.user_id=#{userId} AND b.task_type=#{source} AND b.practice_mode='RECOGNITION' AND a.event_type='ANSWER'
         <if test="batchId != null">AND b.id=#{batchId}</if>
         """;
-    String RANKED = """
+    String RANK_COLUMNS = """
         SELECT a.*,
                ROW_NUMBER() OVER(PARTITION BY word_id ORDER BY answered_at DESC,id DESC) AS word_rank,
                ROW_NUMBER() OVER(PARTITION BY batch_item_id ORDER BY answered_at DESC,id DESC) AS item_rank,
@@ -38,7 +38,10 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
                COUNT(*) OVER(PARTITION BY batch_item_id) AS item_answers,
                MIN(answered_at) OVER(PARTITION BY batch_item_id) AS first_answered_at
         FROM (
-        """ + ANSWERS + ") a ";
+        """;
+    String RANKED = RANK_COLUMNS + ANSWERS + ") a ";
+    // Separate assessment ranking from raw history, which still includes copying feedback.
+    String ASSESSED_RANKED = RANK_COLUMNS + ANSWERS + " AND a.feedback_mode!='FOLLOW_TYPING') a ";
     String COMPLETE = """
         CASE WHEN i.answer_count=COALESCE(a.item_answers,0)
           AND (#{source}='PRACTICE' OR i.study_attempt_count=(SELECT COUNT(*) FROM word_training_attempt t
@@ -55,7 +58,9 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
 
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT CASE WHEN a.word_rank=1 AND a.effective_result IN (2,3) THEN i.word_id END) AS weak_count,
+        SELECT (SELECT COUNT(*) FROM (
+        """ + ASSESSED_RANKED + """
+               ) assessed WHERE word_rank=1 AND effective_result IN (2,3)) AS weak_count,
                COALESCE(SUM(a.item_answers),0) AS answer_count,
                COUNT(DISTINCT CASE WHEN (
         """ + COMPLETE + """
@@ -69,12 +74,12 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
         <script>
         SELECT a.word_id,w.word,w.phonetic,w.translation,#{source} AS source,
                a.effective_result AS last_result,a.id AS last_answer_log_id,a.learning_date,
-               a.answered_at AS last_answered_at,a.word_answers AS answer_count,
+               a.answered_at AS last_answered_at,p.answer_count,
                CASE WHEN p.complete=1 THEN TRUE ELSE FALSE END AS statistics_complete
         FROM (
-        """ + RANKED + """
+        """ + ASSESSED_RANKED + """
         ) a JOIN word w ON w.id=a.word_id
-        JOIN (SELECT word_id,MIN(statistics_complete) AS complete FROM (
+        JOIN (SELECT word_id,MIN(statistics_complete) AS complete,SUM(recorded_answers) AS answer_count FROM (
         """ + ITEM_FACTS + """
         ) facts GROUP BY word_id) p
           ON p.word_id=a.word_id
@@ -85,13 +90,18 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
     List<WeakWordVO> weakWords(@Param("userId") long userId, @Param("source") String source,
             @Param("batchId") Long batchId, @Param("offset") long offset, @Param("limit") int limit);
 
-    @Select("<script>SELECT word_id FROM (" + RANKED + """
+    @Select("<script>SELECT word_id FROM (" + ASSESSED_RANKED + """
         ) ranked WHERE word_rank=1 AND effective_result IN (2,3) AND word_id IN
         <foreach collection="wordIds" item="id" open="(" separator="," close=")">#{id}</foreach>
         </script>
         """)
     List<Long> weakSelection(@Param("userId") long userId, @Param("source") String source,
             @Param("batchId") Long batchId, @Param("wordIds") List<Long> wordIds);
+
+    @Select("SELECT COUNT(*) FROM learning_batch_item i JOIN learning_batch b ON b.id=i.batch_id "
+        + "WHERE b.user_id=#{userId} AND b.id=#{batchId} AND i.learning_status='DONE' "
+        + "AND i.completion_reason='FOLLOW_TYPED' AND " + AssessmentSql.BEFORE_COPY + " IN (2,3)")
+    long copiedUnfamiliarCount(@Param("userId") long userId,@Param("batchId") long batchId);
 
     @Select("""
         <script>
