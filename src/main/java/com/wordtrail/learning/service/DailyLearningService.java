@@ -375,9 +375,9 @@ public class DailyLearningService {
                 && (!Objects.equals(i.getResult(),1) || "LIMIT_REACHED".equals(i.getCompletionReason())
                     || "ASSISTED".equals(i.getCompletionReason()))).count()+copiedUnfamiliar,
             entries.stream().filter(i->"NEW".equals(i.getItemType())).count(),
-            entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count(),actionable?next(entries):null,
+            entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count(),actionable && !"ABANDONED".equals(batch.getStatus())?next(entries):null,
             batch.getStudyMode(),batch.getModeVersion(),entries.stream().mapToLong(LearningBatchItem::getStudyAttemptCount).sum(),
-            batch.getNewWordTarget(),batch.getReviewLimit());
+            batch.getNewWordTarget(),batch.getReviewLimit(),batch.getFollowTypingTarget());
     }
     private DailyAnswerVO answerView(WordReviewLog event,LearningBatch batch,List<LearningBatchItem> entries) {
         var word=words.selectOneById(event.getWordId());

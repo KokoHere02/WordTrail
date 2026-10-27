@@ -124,6 +124,7 @@ class LearningIntegrationTests {
     private final RefreshTokenMapper refreshTokens;
     private final WordReviewLogMapper reviewLogs;
     @Autowired private DictationMapper dictationLogs;
+    @Autowired private FollowTypingMapper followSelection;
     @Autowired private WordTrainingAttemptMapper trainingAttempts;
     private final HttpClient client = HttpClient.newHttpClient();
     private final List<Long> userIds = new ArrayList<>(), bookIds = new ArrayList<>(), wordIds = new ArrayList<>();
@@ -3595,25 +3596,22 @@ class LearningIntegrationTests {
         throw new AssertionError("Missing mode "+mode);
     }
 
-    @Test void unifiedFollowTypingCompletesDailyGoalWithoutClaimingRecallOrAdvancingLevel() throws Exception {
+    @Test void independentFollowTypingCompletesPracticeWithoutChangingDailyGoalOrMemory() throws Exception {
         joinPlan(wordIds.get(0)); var state=state(a,wordIds.get(0));
         state.setReviewLevel(4); state.setNextReviewAt(statisticsDate().atStartOfDay()); states.update(state);
-        long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        var q=trainingQuestion(batch,null); assertEquals(spelling(0),q.get("word").asText());
-        var answer=train(batch,q,spelling(0),null);
-        assertEquals("CORRECT",answer.get("verdict").asText()); assertTrue(answer.get("hintUsed").asBoolean());
-        assertEquals("COMPLETED",answer.get("progress").get("status").asText());
-        assertEquals(1,answer.get("progress").get("completedCount").asInt());
-        assertEquals("FOLLOW_TYPED",details.selectOneById(q.get("itemId").asLong()).getCompletionReason());
-        assertEquals(0,state(a,wordIds.get(0)).getReviewLevel());
-        assertEquals(statisticsDate().plusDays(1).atStartOfDay(),state(a,wordIds.get(0)).getNextReviewAt());
-        assertEquals(1,statisticsDaily(statisticsDate()).get("completedCount").asInt());
-        assertTrue(statisticsDaily(statisticsDate()).get("statisticsComplete").asBoolean());
-        assertEquals(1,insightSummary("DAILY").get("todayCompletedCount").asInt());
-        assertEquals(0,trainingModeStatistics("RECOGNITION").get("answerCount").asInt());
-        assertEquals(1,trainingModeStatistics("FOLLOW_TYPING").get("correctCount").asInt());
-        assertEquals(409,call("PUT",dailyItem(batch,q.get("itemId").asLong())+"/correction",
-            Map.of("requestId",requestId(),"logId",answer.get("reviewLogId").asLong(),"result",1),tokenA).statusCode());
+        long daily=startDay().get("batchId").asLong(); String memory=stateSnapshot(),queue=batchSnapshot(daily);
+        var overview=insightSummary("DAILY"); var stats=statisticsDaily(statisticsDate());
+        long batch=followCreate().get("batchId").asLong(); var q=followNext(batch);
+        assertEquals(spelling(0),q.get("word").asText()); assertEquals("PRACTICE",q.get("progress").get("taskType").asText());
+        assertEquals(20,q.get("progress").get("followTypingTarget").asInt());
+        var answer=followAnswer(batch,q,spelling(0)); assertEquals("CORRECT",answer.get("verdict").asText());
+        assertEquals(1,answer.get("progress").get("completedCount").asInt()); assertEquals(0,answer.get("progress").get("dailyTarget").asInt());
+        assertEquals("COMPLETED",answer.get("progress").get("status").asText()); assertFalse(answer.get("affectsSchedule").asBoolean());
+        assertTrue(answer.get("reviewLogId").isNull()); assertNull(details.selectOneById(q.get("itemId").asLong()).getResult());
+        assertEquals(0,logCount(batch)); assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(daily));
+        assertEquals(overview,insightSummary("DAILY")); assertEquals(stats,statisticsDaily(statisticsDate()));
+        assertEquals(0,trainingModeStatistics("FOLLOW_TYPING").get("answerCount").asInt());
+        assertEquals(1,followStatistics().get("completedWordCount").asInt());
     }
 
     @Test void unifiedSwitchPreservesWordsQueueCompletionAndCurrentItemAndInvalidatesOldPage() throws Exception {
@@ -3632,16 +3630,15 @@ class LearningIntegrationTests {
     }
 
     @Test void unifiedExtraTrainingRecordsBothModesButCountsWordOnlyOnce() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"DICTATION");
         var q=trainingQuestion(batch,null); long item=q.get("itemId").asLong(); train(batch,q,spelling(1),null);
-        String memory=stateSnapshot(); studyMode(batch,"DICTATION"); var extra=trainingQuestion(batch,item);
-        assertTrue(extra.get("extraTraining").asBoolean()); assertEquals(2,extra.get("attemptNo").asInt());
-        var answer=train(batch,extra,spelling(1),null); assertFalse(answer.get("affectsSchedule").asBoolean());
+        String memory=stateSnapshot(); studyMode(batch,"RECOGNITION"); var extra=trainingQuestion(batch,item);
+        assertTrue(extra.get("extraTraining").asBoolean());
+        var answer=train(batch,extra,null,1); assertFalse(answer.get("affectsSchedule").asBoolean());
         assertEquals(memory,stateSnapshot()); assertEquals(1,answer.get("progress").get("completedCount").asInt());
         assertEquals(1,statisticsDaily(statisticsDate()).get("completedCount").asInt());
-        assertEquals(1,trainingModeStatistics("FOLLOW_TYPING").get("answerCount").asInt());
+        assertEquals(1,trainingModeStatistics("RECOGNITION").get("answerCount").asInt());
         assertEquals(1,trainingModeStatistics("DICTATION").get("answerCount").asInt());
-        assertEquals(1,trainingModeStatistics("DICTATION").get("hintedAnswerCount").asInt());
         assertEquals(2,get(dailyPath(batch)+"/training/attempts",tokenA).get("total").asInt());
         assertEquals(1,get("/api/learning/statistics/training",tokenA).get("completedWordCount").asInt());
     }
@@ -3672,14 +3669,16 @@ class LearningIntegrationTests {
         assertEquals(statisticsDate().plusDays(15).atStartOfDay(),state(a,wordIds.get(0)).getNextReviewAt());
     }
 
-    @Test void unifiedWrongCopyDoesNotCompleteAndInputAccuracyIsSeparateFromSelfAssessment() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        var q=trainingQuestion(batch,null); var wrong=train(batch,q,"wrong",null);
-        assertEquals(0,wrong.get("progress").get("completedCount").asInt()); assertNull(state(a,wordIds.get(1)).getFirstLearnedAt());
-        train(batch,trainingQuestion(batch,null),spelling(1),null);
-        var stats=trainingModeStatistics("FOLLOW_TYPING"); assertEquals(2,stats.get("answerCount").asInt());
-        assertEquals(0.5,stats.get("inputAccuracy").asDouble(),0.0001); assertEquals(0,stats.get("recognizedCount").asInt());
-        assertTrue(statisticsDaily(statisticsDate()).get("statisticsComplete").asBoolean());
+    @Test void independentWrongCopyKeepsPracticeOpenAndAccuracySeparateFromSelfAssessment() throws Exception {
+        followPlan(wordIds.get(1)); String memory=stateSnapshot(); long batch=followCreate().get("batchId").asLong();
+        var wrong=followAnswer(batch,followNext(batch),"wrong");
+        assertEquals(0,wrong.get("progress").get("completedCount").asInt()); assertEquals(memory,stateSnapshot());
+        assertEquals(0,followStatistics().get("completedWordCount").asInt());
+        followAnswer(batch,followNext(batch),spelling(1)); var stats=followStatistics();
+        assertEquals(2,stats.get("answerCount").asInt()); assertEquals(0.5,stats.get("inputAccuracy").asDouble(),0.0001);
+        assertEquals(1,stats.get("practicedWordCount").asInt()); assertEquals(1,stats.get("completedWordCount").asInt());
+        assertEquals(memory,stateSnapshot()); assertTrue(statisticsDaily(statisticsDate()).get("statisticsComplete").asBoolean());
+        assertEquals(0,statisticsDaily(statisticsDate()).get("completedCount").asInt());
     }
 
     @Test void unifiedDictationWrongAnswersRequeueAndLimitCompletesWithoutClaimingRecall() throws Exception {
@@ -3693,34 +3692,34 @@ class LearningIntegrationTests {
         assertTrue(statisticsDaily(statisticsDate()).get("statisticsComplete").asBoolean());
     }
 
-    @Test void unifiedRetriesAndConcurrentSubmissionsOnlyConsumeOnePresentation() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        var q=trainingQuestion(batch,null); long item=q.get("itemId").asLong(); var body=trainingBody(q,spelling(1),null,requestId());
-        var gate=new CountDownLatch(1);
+    @Test void independentFollowRetriesAndConcurrentSubmissionsOnlyConsumeOnePresentation() throws Exception {
+        followPlan(wordIds.get(1)); long batch=followCreate().get("batchId").asLong(); var q=followNext(batch);
+        long item=q.get("itemId").asLong(); var body=trainingBody(q,spelling(1),null,requestId());
+        String path=followPath(batch)+"/items/"+item+"/answer"; var gate=new CountDownLatch(1);
         try(var executor=Executors.newFixedThreadPool(2)) {
-            var one=executor.submit(()->{gate.await();return call("PUT",trainingPath(batch,item),body,tokenA);});
-            var two=executor.submit(()->{gate.await();return call("PUT",trainingPath(batch,item),body,tokenA);}); gate.countDown();
+            var one=executor.submit(()->{gate.await();return call("PUT",path,body,tokenA);});
+            var two=executor.submit(()->{gate.await();return call("PUT",path,body,tokenA);}); gate.countDown();
             var first=one.get(10,TimeUnit.SECONDS); var second=two.get(10,TimeUnit.SECONDS);
             assertEquals(200,first.statusCode(),first.body()); assertEquals(200,second.statusCode(),second.body());
             assertEquals(data(first).get("trainingId"),data(second).get("trainingId"));
         }
-        assertEquals(1,get(dailyPath(batch)+"/training/attempts",tokenA).get("total").asInt());
-        assertEquals(1,batchDetails(batch).getFirst().getAnswerCount());
-        var changed=new LinkedHashMap<>(body); changed.put("input","wrong");
-        assertEquals(409,call("PUT",trainingPath(batch,item),changed,tokenA).statusCode());
-        var different=new LinkedHashMap<>(body); different.put("requestId",requestId());
-        assertEquals(409,call("PUT",trainingPath(batch,item),different,tokenA).statusCode());
+        assertEquals(1,get(followPath(batch)+"/attempts",tokenA).get("total").asInt());
+        assertEquals(1,batchDetails(batch).getFirst().getAnswerCount()); assertEquals(0,logCount(batch));
+        var changed=new LinkedHashMap<>(body); changed.put("input","wrong"); assertEquals(409,call("PUT",path,changed,tokenA).statusCode());
+        var different=new LinkedHashMap<>(body); different.put("requestId",requestId()); assertEquals(409,call("PUT",path,different,tokenA).statusCode());
     }
 
-    @Test void unifiedSnapshotsStayStableAndPreferredModeIsUsedTheNextDay() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+    @Test void independentFollowSnapshotsAndProgressSurviveRefreshAndMidnightWithoutChangingPreference() throws Exception {
+        followPlan(wordIds.get(1)); var body=Map.of("requestId",requestId(),"count",10);
+        long batch=followCreate(body).get("batchId").asLong(); var q=followNext(batch);
         String original=spelling(1); var word=words.selectOneById(wordIds.get(1)); word.setWord("changed-reference"); words.update(word);
-        var q=trainingQuestion(batch,null); assertEquals(original,q.get("word").asText()); train(batch,q,original,null);
-        advanceDays(1); var next=startDay(); assertEquals("FOLLOW_TYPING",next.get("studyMode").asText());
-        assertNotEquals(batch,next.get("batchId").asLong());
-        assertEquals(409,call("POST",dailyPath(batch)+"/training/next",null,tokenA).statusCode());
-        assertEquals(1,get(dailyPath(batch)+"/training/attempts",tokenA).get("total").asInt());
-        assertEquals("FOLLOW_TYPING",get("/api/learning/settings",tokenA).get("preferredStudyMode").asText());
+        assertEquals(q,followNext(batch)); advanceDays(1); assertEquals(q,followNext(batch));
+        assertEquals(batch,followCreate(body).get("batchId").asLong());
+        assertEquals(original,followNext(batch).get("word").asText()); followAnswer(batch,q,original);
+        var daily=startDay(); assertEquals("RECOGNITION",daily.get("studyMode").asText());
+        assertEquals("RECOGNITION",get("/api/learning/settings",tokenA).get("preferredStudyMode").asText());
+        assertEquals(1,get(followPath(batch)+"/attempts",tokenA).get("total").asInt());
+        assertEquals(1,followStatistics().get("answerCount").asInt());
     }
 
     @Test void unifiedTrainingRejectsOtherUsersPausedWordsForgedResultsAndStaleModes() throws Exception {
@@ -3740,7 +3739,7 @@ class LearningIntegrationTests {
     }
 
     @Test void unifiedTrainingRollsBackEffectiveFeedbackScheduleAndPresentationWithEventFailure() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"DICTATION");
         var q=trainingQuestion(batch,null); long item=q.get("itemId").asLong(); String memory=stateSnapshot(),queue=batchSnapshot(batch);
         probe.failAfterMapper="com.wordtrail.learning.mapper.WordTrainingAttemptMapper";
         try { assertEquals(500,call("PUT",trainingPath(batch,item),trainingBody(q,spelling(1),null,requestId()),tokenA).statusCode()); }
@@ -3770,18 +3769,18 @@ class LearningIntegrationTests {
         assertEquals(0,statisticsDaily(statisticsDate()).get("completedCount").asInt());
     }
 
-    @Test void unifiedDictationWithMissingMeaningCanSwitchToFollowTypingWithoutReplacingTheWord() throws Exception {
+    @Test void unifiedDictationWithMissingMeaningCanSwitchToListeningWithoutReplacingTheWord() throws Exception {
         dictionaryTranslation(wordIds.get(1),null); joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong();
         long item=itemId(batch); studyMode(batch,"DICTATION");
         var unavailable=call("POST",dailyPath(batch)+"/training/next",null,tokenA);
         assertEquals(409,unavailable.statusCode()); assertEquals("TRAINING_PROMPT_UNAVAILABLE",json.readTree(unavailable.body()).get("code").asText());
-        studyMode(batch,"FOLLOW_TYPING"); var q=trainingQuestion(batch,null); assertEquals(item,q.get("itemId").asLong());
+        studyMode(batch,"LISTEN_DICTATION"); var q=trainingQuestion(batch,null); assertEquals(item,q.get("itemId").asLong());
         train(batch,q,spelling(1),null); assertEquals(1,get(dailyPath(batch),tokenA).get("completedCount").asInt());
     }
 
     @Test void unifiedTrainingAndEffectiveFeedbackShareOneShanghaiDateAcrossMidnight() throws Exception {
         clock.at(Instant.parse("2026-10-25T15:59:59Z")); tokenA=jwt.issue(a);
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"DICTATION");
         var q=trainingQuestion(batch,null); probe.afterNextStateRead=()->clock.advanceSeconds(2);
         var answer=train(batch,q,spelling(1),null); var event=reviewLogs.selectOneById(answer.get("reviewLogId").asLong());
         var training=trainingAttempts.selectOneById(answer.get("trainingId").asLong());
@@ -3847,37 +3846,29 @@ class LearningIntegrationTests {
         assertFalse(row.get("canExtraTrain").asBoolean()); assertEquals("DONE",row.get("itemStatus").asText());
     }
 
-    @Test void trainingPolishCompletionReasonsAreReturnedForCopyRecallAndAttemptLimit() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        var copied=train(batch,trainingQuestion(batch,null),spelling(1),null);
+    @Test void trainingPolishCompletionReasonsAreReturnedForIndependentCopyDailyRecallAndAttemptLimit() throws Exception {
+        followPlan(wordIds.get(1)); long follow=followCreate().get("batchId").asLong();
+        var copied=followAnswer(follow,followNext(follow),spelling(1));
         assertEquals("FOLLOW_TYPED",copied.get("completionReason").asText()); assertEquals("DONE",copied.get("itemStatus").asText());
-        joinPlan(wordIds.get(2)); assertEquals(batch,startDay().get("batchId").asLong()); studyMode(batch,"DICTATION");
-        var recalled=train(batch,trainingQuestion(batch,null),spelling(2),null);
-        assertEquals("RECALLED",recalled.get("completionReason").asText());
-        joinPlan(wordIds.get(3)); startDay(); JsonNode last=null;
+        long batch=startDay().get("batchId").asLong(); studyMode(batch,"DICTATION");
+        assertEquals("RECALLED",train(batch,trainingQuestion(batch,null),spelling(1),null).get("completionReason").asText());
+        joinPlan(wordIds.get(2)); startDay(); JsonNode last=null;
         for(int attempt=0;attempt<6;attempt++) last=train(batch,trainingQuestion(batch,null),"wrong",null);
-        assertEquals("LIMIT_REACHED",last.get("completionReason").asText()); assertEquals("DONE",last.get("itemStatus").asText());
-        var statistics=statisticsDaily(statisticsDate()); assertEquals(3,statistics.get("completedCount").asInt());
-        assertEquals(1,statistics.get("recalledCount").asInt());
+        assertEquals("LIMIT_REACHED",last.get("completionReason").asText());
+        var statistics=statisticsDaily(statisticsDate()); assertEquals(2,statistics.get("completedCount").asInt());
+        assertEquals(1,statistics.get("recalledCount").asInt()); assertEquals(1,followStatistics().get("completedWordCount").asInt());
     }
 
-    @Test void trainingPolishWrongCopyAndExtraTrainingCountInOverviewWithoutDuplicateCompletion() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        var q=trainingQuestion(batch,null); train(batch,q,"wrong",null);
-        var summary=insightSummary("DAILY"); assertTrue(summary.get("hasStudiedToday").asBoolean());
-        assertEquals(1,summary.get("todayTrainingCount").asInt()); assertEquals(1,summary.get("todayAnswerCount").asInt());
-        assertEquals(0,summary.get("todayCompletedCount").asInt()); assertEquals(0,summary.get("todayRecalledCount").asInt());
-        assertEquals(0,logCount(batch));
-        var day=statisticsDaily(statisticsDate()); assertTrue(day.get("hasLearningActivity").asBoolean());
-        assertEquals(1,day.get("trainingCount").asInt()); assertEquals(1,day.get("studiedCount").asInt());
-        train(batch,trainingQuestion(batch,null),spelling(1),null); studyMode(batch,"DICTATION");
-        train(batch,trainingQuestion(batch,q.get("itemId").asLong()),spelling(1),null);
-        summary=insightSummary("DAILY"); day=statisticsDaily(statisticsDate());
-        assertEquals(3,summary.get("todayTrainingCount").asInt()); assertEquals(3,summary.get("todayAnswerCount").asInt());
-        assertEquals(1,summary.get("todayCompletedCount").asInt()); assertEquals(0,summary.get("todayRecalledCount").asInt());
-        assertEquals(3,day.get("answerCount").asInt()); assertEquals(1,day.get("completedCount").asInt());
-        var trend=insightTrend("DAILY",7); assertEquals(3,trend.get("totalTrainingCount").asInt());
-        assertEquals(3,insightDay(trend,statisticsDate()).get("answerCount").asInt());
+    @Test void independentWrongCopyAndExtraTrainingStayOutOfDailyOverview() throws Exception {
+        followPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong();
+        var summary=insightSummary("DAILY"); var day=statisticsDaily(statisticsDate());
+        long batch=followCreate().get("batchId").asLong(); var q=followNext(batch); long item=q.get("itemId").asLong();
+        followAnswer(batch,q,"wrong"); followAnswer(batch,followNext(batch),spelling(1));
+        var extra=call("POST",followPath(batch)+"/next",Map.of("itemId",item),tokenA); assertEquals(200,extra.statusCode());
+        followAnswer(batch,data(extra),spelling(1)); assertEquals(3,followStatistics().get("answerCount").asInt());
+        assertEquals(1,followStatistics().get("completedWordCount").asInt());
+        assertEquals(summary,insightSummary("DAILY")); assertEquals(day,statisticsDaily(statisticsDate()));
+        assertEquals(0,get(dailyPath(daily),tokenA).get("completedCount").asInt());
         assertEquals(0,insightSummary("PRACTICE").get("todayTrainingCount").asInt());
     }
 
@@ -3897,10 +3888,10 @@ class LearningIntegrationTests {
         assertEquals(2,insightSummary("DAILY").get("todayTrainingCount").asInt());
     }
 
-    @Test void trainingPolishActivityDaysAndCalendarIncludeTrainingWithoutEffectiveFeedback() throws Exception {
+    @Test void dailyActivityDaysAndCalendarIncludeRecognitionRevealsWithoutEffectiveFeedback() throws Exception {
         var firstDate=LocalDate.of(2026,10,25); insightDate(firstDate); joinPlan(wordIds.get(1));
-        long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING"); train(batch,trainingQuestion(batch,null),"wrong",null);
-        advanceDays(1); long next=startDay().get("batchId").asLong(); studyMode(next,"RECOGNITION"); train(next,trainingQuestion(next,null),null,null);
+        long batch=startDay().get("batchId").asLong(); train(batch,trainingQuestion(batch,null),null,null);
+        advanceDays(1); long next=startDay().get("batchId").asLong(); train(next,trainingQuestion(next,null),null,null);
         var summary=insightSummary("DAILY"); assertEquals(2,summary.get("currentStreak").asInt()); assertEquals(2,summary.get("totalStudyDays").asInt());
         var calendar=get("/api/learning/statistics/calendar?month=2026-10",tokenA);
         JsonNode found=null; for(var row:calendar.get("days")) if(firstDate.toString().equals(row.get("learningDate").asText())) found=row;
@@ -3910,8 +3901,8 @@ class LearningIntegrationTests {
     }
 
     @Test void trainingPolishMissingTrainingEventsAreReportedIncompleteWithoutInventingActivity() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        var answer=train(batch,trainingQuestion(batch,null),"wrong",null); trainingAttempts.deleteById(answer.get("trainingId").asLong());
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong();
+        var answer=train(batch,trainingQuestion(batch,null),null,null); trainingAttempts.deleteById(answer.get("trainingId").asLong());
         var day=statisticsDaily(statisticsDate()); assertFalse(day.get("statisticsComplete").asBoolean());
         assertEquals(1,day.get("incompleteWordCount").asInt()); assertEquals(0,day.get("trainingCount").asInt());
         assertEquals(0,insightSummary("DAILY").get("totalStudyDays").asInt());
@@ -3923,6 +3914,146 @@ class LearningIntegrationTests {
         assertEquals(200,response.statusCode(),response.body()); return data(response);
     }
     private JsonNode consolidationIssues(String query) throws Exception { return get("/api/learning/consolidation/issues"+query,tokenA); }
+    private String followPath(long batch) { return "/api/learning/follow-typing/batches/"+batch; }
+    private void followPlan(Long... ids) throws Exception {
+        joinPlan(ids);
+        if(!List.of(ids).contains(wordIds.get(0))) {
+            var old=state(a,wordIds.get(0)); old.setPlanStatus("PAUSED"); states.update(old);
+        }
+    }
+    private JsonNode followCreate() throws Exception { return followCreate(Map.of("requestId",requestId())); }
+    private JsonNode followCreate(Object request) throws Exception {
+        var response=call("POST","/api/learning/follow-typing/batches",request,tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
+    private JsonNode followNext(long batch) throws Exception {
+        var response=call("POST",followPath(batch)+"/next",null,tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
+    private JsonNode followAnswer(long batch,JsonNode q,String input) throws Exception {
+        var response=call("PUT",followPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",trainingBody(q,input,null,requestId()),tokenA);
+        assertEquals(200,response.statusCode(),response.body()); return data(response);
+    }
+    private JsonNode followStatistics() throws Exception { return get("/api/learning/follow-typing/statistics",tokenA); }
+    private void finishFollow(long batch) throws Exception {
+        for(int i=0;i<30;i++) {
+            var q=followNext(batch); if(q.isNull()) return; followAnswer(batch,q,q.get("word").asText());
+        }
+        fail("Follow typing did not complete");
+    }
+
+    @Test void independentFollowCreateIsIdempotentAndOnlyOneRoundCanBeInProgress() throws Exception {
+        followPlan(wordIds.get(1),wordIds.get(2)); var body=Map.of("requestId",requestId(),"count",10);
+        long batch=followCreate(body).get("batchId").asLong(); String before=batchSnapshot(batch);
+        assertEquals(batch,followCreate(body).get("batchId").asLong());
+        assertEquals(409,call("POST","/api/learning/follow-typing/batches",Map.of("requestId",body.get("requestId"),"count",20),tokenA).statusCode());
+        var active=call("POST","/api/learning/follow-typing/batches",Map.of("requestId",requestId()),tokenA);
+        assertEquals(409,active.statusCode()); assertEquals("FOLLOW_TYPING_IN_PROGRESS",json.readTree(active.body()).get("code").asText());
+        assertEquals(before,batchSnapshot(batch));
+        var list=get("/api/learning/follow-typing/batches?status=IN_PROGRESS",tokenA); assertEquals(1,list.get("total").asInt());
+        assertEquals(batch,list.get("records").get(0).get("batchId").asLong());
+        var q=followNext(batch); followAnswer(batch,q,q.get("word").asText());
+        assertEquals(1,followCreate(body).get("completedCount").asInt());
+        assertEquals(followNext(batch),followNext(batch)); finishFollow(batch);
+        assertEquals(batch,followCreate(body).get("batchId").asLong());
+    }
+
+    @Test void independentFollowSelectionLimitsPersistAcrossAbandonAndExpireAfterTwentyFourHours() throws Exception {
+        followPlan(wordIds.get(1));
+        for(int i=0;i<2;i++) {
+            long batch=followCreate().get("batchId").asLong();
+            var abandoned=call("POST",followPath(batch)+"/abandon",null,tokenA); assertEquals(200,abandoned.statusCode());
+            assertEquals("ABANDONED",get(followPath(batch),tokenA).get("status").asText());
+            assertTrue(get(followPath(batch),tokenA).get("nextItemId").isNull());
+            assertEquals(409,call("POST",followPath(batch)+"/next",null,tokenA).statusCode());
+        }
+        var capped=call("POST","/api/learning/follow-typing/batches",Map.of("requestId",requestId()),tokenA);
+        assertEquals(409,capped.statusCode()); assertEquals("NO_FOLLOW_TYPING_WORDS",json.readTree(capped.body()).get("code").asText());
+        assertEquals(0,followStatistics().get("answerCount").asInt());
+        advanceDays(1); assertEquals(1,followCreate().get("totalCount").asInt());
+    }
+
+    @Test void independentFollowUsesOnlyActiveOwnPlanAndSkipsWordsMadeUnavailableMidRound() throws Exception {
+        followPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4));
+        var paused=state(a,wordIds.get(3)); paused.setPlanStatus("PAUSED"); states.update(paused);
+        var removed=state(a,wordIds.get(4)); removed.setPlanStatus("REMOVED"); states.update(removed);
+        long batch=followCreate().get("batchId").asLong();
+        var rows=get(followPath(batch)+"/items",tokenA).get("records"); assertEquals(2,rows.size());
+        var actual=new HashSet<Long>(); for(var row:rows) { actual.add(row.get("wordId").asLong()); assertTrue(row.hasNonNull("word")); }
+        assertEquals(Set.of(wordIds.get(1),wordIds.get(2)),actual);
+        var q=followNext(batch); long first=q.get("wordId").asLong(); var firstState=state(a,first);
+        firstState.setPlanStatus("PAUSED"); states.update(firstState);
+        assertEquals(409,call("PUT",followPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",trainingBody(q,q.get("word").asText(),null,requestId()),tokenA).statusCode());
+        var next=followNext(batch); assertNotEquals(first,next.get("wordId").asLong());
+        var secondState=state(a,next.get("wordId").asLong()); secondState.setPlanStatus("REMOVED"); states.update(secondState);
+        assertTrue(followNext(batch).isNull()); var progress=get(followPath(batch),tokenA);
+        assertEquals("COMPLETED",progress.get("status").asText()); assertEquals(2,progress.get("skippedCount").asInt());
+        assertEquals(0,progress.get("completedCount").asInt()); assertEquals(0,followStatistics().get("answerCount").asInt());
+    }
+
+    @Test void independentFollowRejectsOtherUsersFamiliesInvalidAnswersAndInvalidCounts() throws Exception {
+        followPlan(wordIds.get(1)); long batch=followCreate().get("batchId").asLong(); var q=followNext(batch);
+        for(String suffix:List.of("","/items","/attempts")) assertEquals(404,call("GET",followPath(batch)+suffix,null,tokenB).statusCode());
+        assertEquals(404,call("POST",followPath(batch)+"/next",null,tokenB).statusCode());
+        assertEquals(404,call("POST",followPath(batch)+"/abandon",null,tokenB).statusCode());
+        String answer=followPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer";
+        assertEquals(404,call("PUT",answer,trainingBody(q,q.get("word").asText(),null,requestId()),tokenB).statusCode());
+        assertEquals(409,call("PUT",answer,trainingBody(q,q.get("word").asText(),1,requestId()),tokenA).statusCode());
+        assertEquals(409,call("PUT",answer,trainingBody(q,null,null,requestId()),tokenA).statusCode());
+        assertEquals(409,call("POST",dailyPath(batch)+"/training/next",null,tokenA).statusCode());
+        assertEquals(409,call("POST",focusPath(batch)+"/next",null,tokenA).statusCode());
+        assertEquals(200,download(q.get("audioUrl").asText(),tokenA).statusCode());
+        assertEquals(404,download(q.get("audioUrl").asText(),tokenB).statusCode());
+        for(int count:List.of(0,9,21)) assertEquals(400,call("POST","/api/learning/follow-typing/batches",Map.of("requestId",requestId(),"count",count),tokenA).statusCode());
+        assertEquals(401,call("GET","/api/learning/follow-typing/statistics",null,null).statusCode());
+        assertEquals(400,call("GET","/api/learning/follow-typing/statistics?date=2026-02-30",null,tokenA).statusCode());
+        assertTrue(get("/api/learning/follow-typing/statistics",tokenB).get("inputAccuracy").isNull());
+        assertEquals(0,get(followPath(batch)+"/attempts",tokenA).get("total").asInt());
+    }
+
+    @Test void independentFollowRollsBackCreationAndAnswerOnPersistenceFailure() throws Exception {
+        followPlan(wordIds.get(1)); long count=countBatches(); probe.failAfterMapper="com.wordtrail.learning.mapper.LearningBatchItemMapper";
+        try { assertEquals(500,call("POST","/api/learning/follow-typing/batches",Map.of("requestId",requestId()),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; } assertEquals(count,countBatches());
+        long batch=followCreate().get("batchId").asLong(); var q=followNext(batch); String before=batchSnapshot(batch),memory=stateSnapshot();
+        probe.failAfterMapper="com.wordtrail.learning.mapper.WordTrainingAttemptMapper";
+        try { assertEquals(500,call("PUT",followPath(batch)+"/items/"+q.get("itemId").asLong()+"/answer",trainingBody(q,q.get("word").asText(),null,requestId()),tokenA).statusCode()); }
+        finally { probe.failAfterMapper=null; }
+        assertEquals(before,batchSnapshot(batch)); assertEquals(memory,stateSnapshot()); assertEquals(q,followNext(batch));
+        assertEquals(0,followStatistics().get("answerCount").asInt());
+    }
+
+    @Test void independentFollowWeightsUseCorrectedRealAssessmentsAndNeverRawCopyFeedback() throws Exception {
+        followPlan(wordIds.get(1)); var raw=state(a,wordIds.get(1)); raw.setLastResult(3); states.update(raw);
+        var candidate=followSelection.candidates(a,contextTime().minusHours(24)).getFirst();
+        assertNull(candidate.recognitionResult()); assertNull(candidate.recallVerdict());
+        long follow=followCreate().get("batchId").asLong(); finishFollow(follow);
+        candidate=followSelection.candidates(a,contextTime().minusHours(24)).getFirst();
+        assertNull(candidate.recognitionResult()); assertNull(candidate.recallVerdict()); assertNotNull(candidate.lastPracticedAt());
+        long daily=startDay().get("batchId").asLong(); var q=trainingQuestion(daily,null); var answer=train(daily,q,null,3);
+        assertEquals(3,followSelection.candidates(a,contextTime().minusHours(24)).getFirst().recognitionResult());
+        correction(daily,q.get("itemId").asLong(),answer.get("reviewLogId").asLong(),1,requestId());
+        assertEquals(1,followSelection.candidates(a,contextTime().minusHours(24)).getFirst().recognitionResult());
+        advanceDays(1); daily=startDay().get("batchId").asLong(); studyMode(daily,"DICTATION");
+        train(daily,trainingQuestion(daily,null),spelling(1),null);
+        candidate=followSelection.candidates(a,contextTime().minusHours(24)).getFirst();
+        assertEquals("CORRECT",candidate.recallVerdict()); assertFalse(candidate.recallHintUsed());
+        assertEquals(0.5,com.wordtrail.learning.service.FollowTypingSelector.weight(candidate,contextTime()));
+    }
+
+    @Test void dailyFollowModeIsRejectedAndLegacyPreferencesAndSnapshotsArePreserved() throws Exception {
+        followPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); String before=batchSnapshot(batch),memory=stateSnapshot();
+        var rejected=call("PUT",dailyPath(batch)+"/mode",Map.of("mode","FOLLOW_TYPING","expectedVersion",0),tokenA);
+        assertEquals(409,rejected.statusCode()); assertEquals("FOLLOW_TYPING_PRACTICE_REQUIRED",json.readTree(rejected.body()).get("code").asText());
+        assertEquals(before,batchSnapshot(batch)); assertEquals(memory,stateSnapshot());
+        var old=batches.selectOneById(batch); old.setStudyMode("FOLLOW_TYPING"); batches.update(old);
+        assertEquals(409,call("POST",dailyPath(batch)+"/training/next",null,tokenA).statusCode());
+        assertEquals("FOLLOW_TYPING",batches.selectOneById(batch).getStudyMode());
+        studyMode(batch,"RECOGNITION"); var setting=learningSettings.selectOneById(a); setting.setPreferredStudyMode("FOLLOW_TYPING"); learningSettings.update(setting);
+        assertEquals("RECOGNITION",get("/api/learning/settings",tokenA).get("preferredStudyMode").asText());
+        assertEquals("FOLLOW_TYPING",learningSettings.selectOneById(a).getPreferredStudyMode());
+        advanceDays(1); assertEquals("RECOGNITION",startDay().get("studyMode").asText());
+    }
     private JsonNode focusCreate(Object body) throws Exception {
         var response=call("POST","/api/learning/consolidation/batches",body,tokenA);
         assertEquals(200,response.statusCode(),response.body()); return data(response);
@@ -3965,21 +4096,47 @@ class LearningIntegrationTests {
         assertEquals(1,get(dailyPath(task.get("batchId").asLong()),tokenA).get("newWordTarget").asInt());
     }
 
-    @Test void expansionWrongReasonsShowActualSpellingAndCopyingCreatesNoIssue() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING");
-        train(batch,trainingQuestion(batch,null),spelling(1),null);
-        assertEquals(0,consolidationIssues("").get("total").asInt());
-        assertEquals(0,consolidationIssues("?reason=PENDING_VERIFICATION").get("total").asInt());
+    @Test void expansionWrongReasonsShowActualSpellingAndIndependentCopyingCreatesNoIssue() throws Exception {
+        followPlan(wordIds.get(1)); long follow=followCreate().get("batchId").asLong();
+        followAnswer(follow,followNext(follow),"wrong"); followAnswer(follow,followNext(follow),spelling(1));
         assertEquals(0,consolidationIssues("?category=ALL").get("total").asInt());
+        assertEquals(0,consolidationIssues("?reason=PENDING_VERIFICATION").get("total").asInt());
         assertEquals(0,consolidationIssues("?category=VERIFICATION").get("total").asInt());
-        assertEquals(4,get("/api/learning/consolidation/summary",tokenA).size());
-        assertEquals(0,weakWords("DAILY").get("total").asInt());
-        assertEquals(0,get(dailyPath(batch),tokenA).get("unfamiliarCount").asInt());
-        assertEquals(0,statisticsDaily(statisticsDate()).get("unfamiliarCount").asInt());
-        joinPlan(wordIds.get(2)); startDay(); studyMode(batch,"DICTATION"); var q=trainingQuestion(batch,null);
-        train(batch,q,"misspelled",null); var errors=consolidationIssues("?reason=SPELLING_ERROR"); assertEquals(1,errors.get("total").asInt());
-        assertEquals("misspelled",errors.get("records").get(0).get("lastInput").asText()); assertEquals(spelling(2),errors.get("records").get(0).get("word").asText());
+        var summary=get("/api/learning/consolidation/summary",tokenA); assertEquals(4,summary.size());
+        for(var reason:summary) { assertNotEquals("PENDING_VERIFICATION",reason.get("reason").asText()); assertEquals(0,reason.get("wordCount").asInt()); }
+        assertEquals(0,weakWords("DAILY").get("total").asInt()); assertEquals(409,weakPractice("DAILY",wordIds.get(1)).statusCode());
+        assertEquals(2,followStatistics().get("answerCount").asInt());
+        assertEquals(409,call("POST","/api/learning/consolidation/batches",Map.of("requestId",requestId(),"category","ALL"),tokenA).statusCode());
+        joinPlan(wordIds.get(2)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"DICTATION");
+        var q=trainingQuestion(batch,null); train(batch,q,"misspelled",null);
+        var errors=consolidationIssues("?reason=SPELLING_ERROR"); assertEquals(1,errors.get("total").asInt());
+        assertEquals("misspelled",errors.get("records").get(0).get("lastInput").asText());
         assertEquals(0,get("/api/learning/consolidation/issues?category=ALL",tokenB).get("total").asInt());
+    }
+
+    @Test void independentCopyingAfterRealErrorsPreservesReasonsAndFamiliarityEvidence() throws Exception {
+        int index=1;
+        for(String mode:List.of("DICTATION","LISTEN_DICTATION","RECOGNITION")) {
+            joinPlan(wordIds.get(index)); long batch=startDay().get("batchId").asLong(); studyMode(batch,mode);
+            var q=trainingQuestion(batch,null); train(batch,q,mode.equals("RECOGNITION")?null:"wrong",mode.equals("RECOGNITION")?3:null);
+            index++; advanceDays(1);
+        }
+        var errors=consolidationIssues("?category=ALL"); var weak=weakWords("DAILY"); String memory=stateSnapshot();
+        long batch=followCreate().get("batchId").asLong(); finishFollow(batch);
+        assertEquals(errors,consolidationIssues("?category=ALL")); assertEquals(weak,weakWords("DAILY")); assertEquals(memory,stateSnapshot());
+        long focus=focusCreate(Map.of("requestId",requestId(),"reason","SPELLING_ERROR","mode","FOLLOW_TYPING")).get("batchId").asLong();
+        var q=focusNext(focus); String word=q.get("word").asText(); focusAnswer(focus,q,"wrong",null); focusAnswer(focus,focusNext(focus),word,null);
+        assertEquals(errors,consolidationIssues("?category=ALL"));
+    }
+
+    @Test void independentFollowingAcrossDaysDoesNotReplaceEarlierWeakWordAssessments() throws Exception {
+        joinPlan(wordIds.get(1)); long daily=startDay().get("batchId").asLong(); train(daily,trainingQuestion(daily,null),null,3);
+        var weak=weakWords("DAILY"); long batch=followCreate().get("batchId").asLong(); finishFollow(batch);
+        advanceDays(1); batch=followCreate().get("batchId").asLong(); finishFollow(batch);
+        assertEquals(weak,weakWords("DAILY")); assertEquals(0,statisticsDaily(statisticsDate()).get("completedCount").asInt());
+        assertEquals(1,consolidationIssues("?reason=UNRECOGNIZED").get("total").asInt());
+        long next=startDay().get("batchId").asLong(); studyMode(next,"RECOGNITION"); train(next,trainingQuestion(next,null),null,1);
+        assertEquals(0,weakWords("DAILY").get("total").asInt()); assertEquals(0,consolidationIssues("?category=ALL").get("total").asInt());
     }
 
     @Test void expansionRevealsUnknownAndAttemptLimitAreSeparateAndCorrectionsAreHonored() throws Exception {
@@ -4068,7 +4225,7 @@ class LearningIntegrationTests {
             jdbc.update("INSERT INTO user_sentence_note(user_id,sentence_id,content,version,updated_at) VALUES(?,?,?,?,?)",a,sentence,"本人私有笔记",1,contextTime());
             jdbc.update("INSERT INTO user_sentence_note(user_id,sentence_id,content,version,updated_at) VALUES(?,?,?,?,?)",b,sentence,"其他用户秘密笔记",1,contextTime());
             jdbc.update("INSERT INTO user_sentence_favorite(user_id,sentence_id,created_at) VALUES(?,?,?)",a,sentence,contextTime());
-            joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); studyMode(batch,"FOLLOW_TYPING"); train(batch,trainingQuestion(batch,null),spelling(1),null);
+            followPlan(wordIds.get(1)); long batch=followCreate().get("batchId").asLong(); followAnswer(batch,followNext(batch),spelling(1));
             String memory=stateSnapshot(),queue=batchSnapshot(batch);
             var response=download("/api/me/learning-data/export?userId="+b,tokenA); assertEquals(200,response.statusCode());
             assertTrue(response.headers().firstValue("Content-Disposition").orElse("").contains(".zip"));

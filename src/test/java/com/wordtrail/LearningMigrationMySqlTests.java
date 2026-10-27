@@ -258,6 +258,29 @@ class LearningMigrationMySqlTests {
                 second.setCatalog(schema);
                 assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(second,new ClassPathResource("db/012_consolidation_allocation_audio.sql").getContentAsString(StandardCharsets.UTF_8)));
             }
+            var beforeThirteen=history(c);
+            var beforeFollowBatches=rows(c,"SELECT * FROM learning_batch ORDER BY id");
+            var beforeFollowSettings=rows(c,"SELECT * FROM user_learning_setting ORDER BY user_id");
+            var beforeFollowTraining=rows(c,"SELECT * FROM word_training_attempt ORDER BY id");
+            var beforeFollowMemory=rows(c,"SELECT * FROM user_word_state ORDER BY id");
+            run(c,new ClassPathResource("db/013_follow_typing_precheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            run(c,new ClassPathResource("db/013_independent_follow_typing.sql").getContentAsString(StandardCharsets.UTF_8));
+            assertEquals(beforeThirteen,history(c));
+            var afterFollowBatches=rows(c,"SELECT * FROM learning_batch ORDER BY id");
+            assertEquals(beforeFollowBatches,afterFollowBatches.stream().map(row->new ArrayList<>(row.subList(0,row.size()-1))).toList());
+            assertEquals(beforeFollowSettings,rows(c,"SELECT * FROM user_learning_setting ORDER BY user_id"));
+            assertEquals(beforeFollowTraining,rows(c,"SELECT * FROM word_training_attempt ORDER BY id"));
+            assertEquals(beforeFollowMemory,rows(c,"SELECT * FROM user_word_state ORDER BY id"));
+            assertEquals("0",scalar(c,"SELECT COUNT(*) FROM learning_batch WHERE follow_typing_target IS NOT NULL"));
+            run(c,"INSERT INTO learning_batch(id,user_id,selection_type,task_type,practice_mode,study_mode,creation_request_id,creation_fingerprint,follow_typing_target) VALUES(6000,1,'MANUAL','PRACTICE','FOLLOW_TYPING','FOLLOW_TYPING','migration_follow_request',REPEAT('e',64),20)");
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE learning_batch SET follow_typing_target=21 WHERE id=6000"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE learning_batch SET study_mode='DICTATION' WHERE id=6000"));
+            assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(c,"UPDATE learning_batch SET follow_typing_target=20 WHERE id=5000"));
+            run(c,new ClassPathResource("db/013_follow_typing_postcheck.sql").getContentAsString(StandardCharsets.UTF_8));
+            try(var second=DriverManager.getConnection(url,System.getenv().getOrDefault("DB_USERNAME","root"),System.getenv().getOrDefault("DB_PASSWORD","root"))) {
+                second.setCatalog(schema);
+                assertThrows(org.springframework.jdbc.datasource.init.ScriptStatementFailedException.class,()->run(second,new ClassPathResource("db/013_independent_follow_typing.sql").getContentAsString(StandardCharsets.UTF_8)));
+            }
         }
         // Keep the isolated schema for subsequent real-MySQL HTTP tests and manual inspection.
     }

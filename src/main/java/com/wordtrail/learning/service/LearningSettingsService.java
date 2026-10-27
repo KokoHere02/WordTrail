@@ -36,15 +36,18 @@ public class LearningSettingsService {
 
     String preferredMode(long userId) {
         var existing=settings.selectOneById(userId);
-        return existing==null ? "RECOGNITION" : existing.getPreferredStudyMode();
+        return dailyMode(existing);
     }
     UserLearningSetting allocation(long userId) { return settings.selectOneById(userId); }
     public PronunciationVO pronunciation(long userId) { return view(settings.selectOneById(userId)).pronunciation(); }
     private LearningSettingsVO view(UserLearningSetting value) {
         return new LearningSettingsVO(value==null?DEFAULT_DAILY_TARGET:value.getDailyTarget(),
-            value==null?"RECOGNITION":value.getPreferredStudyMode(),value==null?null:value.getNewWordTarget(),value==null?null:value.getReviewLimit(),
+            dailyMode(value),value==null?null:value.getNewWordTarget(),value==null?null:value.getReviewLimit(),
             new PronunciationVO(value!=null && Boolean.TRUE.equals(value.getAudioAutoPlay()),
                 value==null?"US":value.getAudioAccent(),value==null?BigDecimal.ONE:value.getAudioPlaybackRate(),value==null?1:value.getAudioRepeatCount()));
+    }
+    private String dailyMode(UserLearningSetting value) {
+        return value==null || "FOLLOW_TYPING".equals(value.getPreferredStudyMode())?"RECOGNITION":value.getPreferredStudyMode();
     }
     private UserLearningSetting editable(long userId) {
         var value=settings.selectOneById(userId);

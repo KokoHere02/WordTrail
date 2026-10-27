@@ -30,4 +30,5 @@ public class LearningBatch {
     private String creationRequestId;
     private String creationFingerprint;
     private String consolidationReason;
+    private Integer followTypingTarget;
 }

@@ -57,7 +57,7 @@ public class LearningStatisticsService {
         return new PageVO<>(query.getPage(), query.getSize(), count, records);
     }
 
-    private LocalDate date(String value) {
+    LocalDate date(String value) {
         if (value == null) { return context.today(); }
         try { return LocalDate.parse(value); }
         catch (DateTimeParseException ex) { throw invalid("date 必须是有效日期，格式为 YYYY-MM-DD"); }
