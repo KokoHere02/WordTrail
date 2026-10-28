@@ -65,18 +65,6 @@ public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
                               @Param("offset") long offset, @Param("limit") int limit);
 
     @Select("""
-        SELECT w.id
-        FROM word_book_item bi
-        INNER JOIN word w ON w.id = bi.word_id
-        LEFT JOIN user_word_state s ON s.word_id = w.id AND s.user_id = #{userId}
-        WHERE bi.book_id = #{bookId} AND s.first_learned_at IS NULL
-        ORDER BY bi.sort_order ASC, bi.id ASC
-        LIMIT #{limit}
-        """)
-    List<Long> selectUnlearned(@Param("bookId") long bookId, @Param("userId") long userId,
-                               @Param("limit") int limit);
-
-    @Select("""
         <script>
         SELECT w.id FROM word_book_item bi
         INNER JOIN word w ON w.id = bi.word_id

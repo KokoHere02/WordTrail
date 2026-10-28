@@ -3,7 +3,6 @@ package com.wordtrail.learning.mapper;
 import com.mybatisflex.core.BaseMapper;
 import com.wordtrail.learning.entity.WordReviewLog;
 import com.wordtrail.learning.vo.WeakWordVO;
-import com.wordtrail.learning.vo.ResultWordVO;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.apache.ibatis.annotations.*;
@@ -90,32 +89,8 @@ public interface ReviewEvidenceMapper extends BaseMapper<WordReviewLog> {
     List<WeakWordVO> weakWords(@Param("userId") long userId, @Param("source") String source,
             @Param("batchId") Long batchId, @Param("offset") long offset, @Param("limit") int limit);
 
-    @Select("<script>SELECT word_id FROM (" + ASSESSED_RANKED + """
-        ) ranked WHERE word_rank=1 AND effective_result IN (2,3) AND word_id IN
-        <foreach collection="wordIds" item="id" open="(" separator="," close=")">#{id}</foreach>
-        </script>
-        """)
-    List<Long> weakSelection(@Param("userId") long userId, @Param("source") String source,
-            @Param("batchId") Long batchId, @Param("wordIds") List<Long> wordIds);
-
     @Select("SELECT COUNT(*) FROM learning_batch_item i JOIN learning_batch b ON b.id=i.batch_id "
         + "WHERE b.user_id=#{userId} AND b.id=#{batchId} AND i.learning_status='DONE' "
         + "AND i.completion_reason='FOLLOW_TYPED' AND " + AssessmentSql.BEFORE_COPY + " IN (2,3)")
     long copiedUnfamiliarCount(@Param("userId") long userId,@Param("batchId") long batchId);
-
-    @Select("""
-        <script>
-        SELECT i.id AS item_id,i.word_id,w.word,w.phonetic,w.translation,i.result,i.answered_at,
-               i.recorded_answers AS answer_count,
-               CASE WHEN i.statistics_complete=1 THEN TRUE ELSE FALSE END AS statistics_complete
-        FROM (
-        """ + ITEM_FACTS + """
-        ) i JOIN word w ON w.id=i.word_id
-        <if test="result != null">WHERE i.result=#{result}</if>
-        ORDER BY i.sort_order ASC,i.id ASC LIMIT #{limit} OFFSET #{offset}
-        </script>
-        """)
-    List<ResultWordVO> resultWords(@Param("userId") long userId, @Param("source") String source,
-            @Param("batchId") Long batchId, @Param("result") Integer result,
-            @Param("offset") long offset, @Param("limit") int limit);
 }
