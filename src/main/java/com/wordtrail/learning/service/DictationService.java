@@ -45,6 +45,8 @@ public class DictationService {
         var now=context.now(); var batch=new LearningBatch();
         batch.setUserId(userId); batch.setBookId(request.getBookId()); batch.setTaskType("PRACTICE");
         batch.setPracticeMode("DICTATION"); batch.setSelectionType("MANUAL"); batch.setStatus("IN_PROGRESS");
+        // Old independent practice used the default RECOGNITION study mode. Preserve it as history.
+        batch.setStudyMode("DICTATION");
         batch.setCreatedAt(now); batch.setUpdatedAt(now);
         if(batches.insertSelective(batch)!=1) throw new IllegalStateException("Could not create dictation batch");
         var entries=new ArrayList<LearningBatchItem>();
@@ -53,7 +55,7 @@ public class DictationService {
             item.setSortOrder(entries.size()+1); item.setQueueOrder((long)entries.size()+1);
             item.setLearningStatus("PENDING"); item.setAnswerCount(0); item.setRelearnCount(0);
             item.setDictationTarget(candidate.word().strip()); item.setDictationTranslation(candidate.translation());
-            item.setDictationHadFailure(request.getSource()==CreateDictationRequest.Source.MISTAKES);
+            item.setDictationHadFailure(false);
             item.setDictationCorrectStreak(0); entries.add(item);
         }
         if(items.insertBatch(entries)!=entries.size()) throw new IllegalStateException("Could not create all dictation items");
@@ -67,6 +69,7 @@ public class DictationService {
     @Transactional
     public DictationQuestionVO next(long batchId) {
         context.lockUser(currentUser.id()); var batch=owned(batchId,true);
+        requireTest(batch);
         if(!"IN_PROGRESS".equals(batch.getStatus())) throw conflict("DICTATION_NOT_IN_PROGRESS","本轮默写已结束，请查看结果");
         var item=next(context.entries(batchId));
         if(item==null) throw conflict("DICTATION_NOT_IN_PROGRESS","本轮没有待答题目");
@@ -75,12 +78,13 @@ public class DictationService {
         }
         String prompt=DictationPolicy.prompt(item.getDictationTranslation(),item.getDictationTarget());
         return new DictationQuestionVO(item.getId(),prompt,TranslationParser.parse(prompt),item.getDictationPresentationId(),
-            item.getAnswerCount()+1,item.getDictationCorrectStreak(),item.getDictationHadFailure()?2:1,DictationPolicy.MAX_ATTEMPTS);
+            1,0,1,DictationPolicy.MAX_ATTEMPTS);
     }
 
     @Transactional
     public DictationAnswerVO answer(long batchId,long itemId,DictationAnswerRequest request) {
         long userId=currentUser.id(); context.lockUser(userId); var batch=owned(batchId,true);
+        requireTest(batch);
         var entries=context.entries(batchId);
         var item=entries.stream().filter(value->value.getId()==itemId).findFirst()
             .orElseThrow(()->conflict("DICTATION_ITEM_NOT_FOUND","题目不属于本轮默写"));
@@ -94,22 +98,22 @@ public class DictationService {
                 || !previous.getAttemptNo().equals(request.attemptNo())) throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
             return answerView(previous,item,progress(batch,entries));
         }
+        if(item.getAnswerCount()>0) throw conflict("DICTATION_ALREADY_ANSWERED","本题已提交，不能修改答案；错词请另开一轮重测");
         if(!"IN_PROGRESS".equals(batch.getStatus()) || next(entries)==null || next(entries).getId()!=itemId
-            || !Objects.equals(item.getDictationPresentationId(),request.presentationId()) || item.getAnswerCount()+1!=request.attemptNo())
+            || !Objects.equals(item.getDictationPresentationId(),request.presentationId()) || request.attemptNo()!=1)
             throw conflict("STALE_DICTATION_ANSWER","题目或作答序号已变化，请重新获取下一题");
-        int before=item.getDictationCorrectStreak(); var now=context.now();
-        var outcome=DictationPolicy.answer(item.getDictationTarget(),request.input(),reveal,item.getDictationHadFailure(),before,request.attemptNo());
-        item.setAnswerCount(request.attemptNo()); item.setAnsweredAt(now); item.setDictationHadFailure(outcome.hadFailure());
+        var now=context.now();
+        var outcome=DictationPolicy.answer(item.getDictationTarget(),request.input(),reveal);
+        item.setAnswerCount(1); item.setAnsweredAt(now); item.setDictationHadFailure(outcome.hadFailure());
         item.setDictationCorrectStreak(outcome.correctStreak()); item.setDictationPresentationId(null);
-        item.setLearningStatus(outcome.done()?"DONE":"RELEARNING"); item.setCompletionReason(outcome.completionReason());
-        item.setCompletedAt(outcome.done()?now:null); item.setRelearnCount(Math.max(item.getAnswerCount()-1,0));
+        item.setLearningStatus("DONE"); item.setCompletionReason(outcome.completionReason());
+        item.setCompletedAt(now); item.setRelearnCount(0);
         save(item);
-        if(!outcome.done()) requeue(entries,item);
         var event=new DictationReviewLog(); event.setUserId(userId); event.setWordId(item.getWordId());
         event.setBatchId(batchId); event.setBatchItemId(itemId); event.setRequestId(request.requestId()); event.setPresentationId(request.presentationId());
         event.setEventType(request.action().name()); event.setInputText(request.input()); event.setVerdict(outcome.verdict());
         event.setAttemptNo(request.attemptNo()); event.setLearningDate(now.toLocalDate()); event.setAnsweredAt(now);
-        event.setCorrectStreakBefore(before); event.setCorrectStreakAfter(outcome.correctStreak()); event.setHadFailureAfter(outcome.hadFailure());
+        event.setCorrectStreakBefore(0); event.setCorrectStreakAfter(outcome.correctStreak()); event.setHadFailureAfter(outcome.hadFailure());
         event.setItemStatusAfter(item.getLearningStatus()); event.setCompletionReasonAfter(outcome.completionReason()); event.setAffectsSchedule(false);
         if(logs.insertSelective(event)!=1) throw new IllegalStateException("Could not persist dictation event");
         if(next(entries)==null) { batch.setStatus("COMPLETED"); batch.setCompletedAt(now); }
@@ -117,15 +121,6 @@ public class DictationService {
         return answerView(event,item,progress(batch,entries));
     }
 
-    private void requeue(List<LearningBatchItem> entries,LearningBatchItem current) {
-        var queue=entries.stream().filter(item->!"DONE".equals(item.getLearningStatus()) && !item.getId().equals(current.getId()))
-            .sorted(Comparator.comparing(LearningBatchItem::getQueueOrder).thenComparing(LearningBatchItem::getId))
-            .collect(Collectors.toCollection(ArrayList::new));
-        queue.add(Math.min(3,queue.size()),current);
-        for(int index=0;index<queue.size();index++) {
-            var item=queue.get(index); item.setQueueOrder((long)index+1); save(item);
-        }
-    }
     private void save(LearningBatchItem item) {
         if(items.updateByQuery(item,false,QueryWrapper.create().where(column("id").eq(item.getId())))!=1)
             throw new IllegalStateException("Could not persist dictation item");
@@ -139,18 +134,28 @@ public class DictationService {
         if(!"DICTATION".equals(batch.getPracticeMode())) throw conflict("NOT_DICTATION_TASK","该批次不是默写，请使用原学习接口");
         return batch;
     }
+    private boolean singleAttempt(LearningBatch batch) { return "DICTATION".equals(batch.getStudyMode()); }
+    private void requireTest(LearningBatch batch) {
+        if(!singleAttempt(batch)) throw conflict("DICTATION_LEGACY_READ_ONLY","旧版默写练习仅供查看，请新建单次作答测验");
+    }
     private DictationTaskVO progress(LearningBatch batch,List<LearningBatchItem> entries) {
         long completed=entries.stream().filter(item->"DONE".equals(item.getLearningStatus())).count();
         long passed=entries.stream().filter(item->"RECALLED".equals(item.getCompletionReason())).count();
         var next=next(entries);
+        boolean test=singleAttempt(batch),finished="COMPLETED".equals(batch.getStatus());
+        boolean canContinue=test && "IN_PROGRESS".equals(batch.getStatus()) && next!=null;
         return new DictationTaskVO(batch.getId(),batch.getBookId(),batch.getTaskType(),batch.getPracticeMode(),batch.getStatus(),
-            entries.size(),completed,passed,completed-passed,entries.stream().mapToLong(LearningBatchItem::getAnswerCount).sum(),
-            "IN_PROGRESS".equals(batch.getStatus()) && next!=null?next.getId():null,DictationPolicy.MAX_ATTEMPTS,batch.getCreatedAt(),batch.getCompletedAt());
+            entries.size(),completed,test && !finished?null:passed,test && !finished?null:completed-passed,
+            entries.stream().mapToLong(LearningBatchItem::getAnswerCount).sum(),
+            canContinue?next.getId():null,test?DictationPolicy.MAX_ATTEMPTS:6,batch.getCreatedAt(),batch.getCompletedAt(),
+            test,canContinue,test && finished && !entries.isEmpty()?(double)passed/entries.size():null);
     }
     private DictationAnswerVO answerView(DictationReviewLog event,LearningBatchItem item,DictationTaskVO progress) {
-        return new DictationAnswerVO(event.getId(),item.getId(),event.getEventType(),event.getInputText(),item.getDictationTarget(),
-            item.getDictationTranslation(),event.getVerdict(),event.getAttemptNo(),event.getCorrectStreakAfter(),
-            event.getItemStatusAfter(),event.getCompletionReasonAfter(),event.getAnsweredAt(),false,progress);
+        boolean disclose="COMPLETED".equals(progress.status()) || "REVEAL".equals(event.getEventType());
+        return new DictationAnswerVO(event.getId(),item.getId(),event.getEventType(),event.getInputText(),
+            disclose?item.getDictationTarget():null,disclose?item.getDictationTranslation():null,
+            disclose?event.getVerdict():null,event.getAttemptNo(),disclose?event.getCorrectStreakAfter():null,
+            event.getItemStatusAfter(),disclose?event.getCompletionReasonAfter():null,event.getAnsweredAt(),false,progress);
     }
 
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
@@ -166,7 +171,7 @@ public class DictationService {
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public PageVO<DictationWordVO> result(long batchId,WordHistoryQuery query) {
         var batch=owned(batchId,false);
-        if(!"COMPLETED".equals(batch.getStatus())) throw conflict("DICTATION_NOT_COMPLETED","本轮尚未结束，请继续获取下一题");
+        if(singleAttempt(batch) && !"COMPLETED".equals(batch.getStatus())) throw conflict("DICTATION_NOT_COMPLETED","测验结束后才能统一查看答案");
         long count=items.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batchId)));
         long offset=((long)query.getPage()-1)*query.getSize();
         return new PageVO<>(query.getPage(),query.getSize(),count,offset>=count?List.of():logs.resultWords(batchId,offset,query.getSize()));

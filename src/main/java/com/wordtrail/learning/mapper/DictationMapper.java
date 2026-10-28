@@ -11,7 +11,11 @@ public interface DictationMapper extends BaseMapper<DictationReviewLog> {
     String LATEST = """
         SELECT l.* FROM dictation_review_log l JOIN learning_batch b ON b.id=l.batch_id AND b.user_id=l.user_id
         WHERE l.user_id=#{userId} AND b.practice_mode='DICTATION'
-          AND NOT EXISTS(SELECT 1 FROM dictation_review_log newer WHERE newer.user_id=l.user_id AND newer.word_id=l.word_id AND newer.id>l.id)
+          AND (b.study_mode!='DICTATION' OR b.status='COMPLETED')
+          AND NOT EXISTS(SELECT 1 FROM dictation_review_log newer JOIN learning_batch nb
+            ON nb.id=newer.batch_id AND nb.user_id=newer.user_id
+            WHERE newer.user_id=l.user_id AND newer.word_id=l.word_id AND newer.id>l.id
+              AND nb.practice_mode='DICTATION' AND (nb.study_mode!='DICTATION' OR nb.status='COMPLETED'))
         """;
     String NEEDS = "(l.item_status_after='RELEARNING' OR l.completion_reason_after='LIMIT_REACHED')";
 
@@ -57,6 +61,7 @@ public interface DictationMapper extends BaseMapper<DictationReviewLog> {
         FROM dictation_review_log l JOIN learning_batch b ON b.id=l.batch_id AND b.user_id=l.user_id
         JOIN learning_batch_item i ON i.id=l.batch_item_id AND i.batch_id=b.id
         WHERE l.user_id=#{userId} AND l.word_id=#{wordId} AND b.practice_mode='DICTATION'
+          AND (b.study_mode!='DICTATION' OR b.status='COMPLETED')
         """;
     @Select("SELECT COUNT(*) "+HISTORY)
     long countHistory(@Param("userId") long userId,@Param("wordId") long wordId);

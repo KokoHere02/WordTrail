@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonAnySetter;
 import jakarta.validation.constraints.*;
 
 public record DictationAnswerRequest(@NotNull Action action, @Size(max=255) String input,
-        @NotNull @Min(1) @Max(6) Integer attemptNo,
+        @NotNull @Min(1) @Max(1) Integer attemptNo,
         @NotBlank @Pattern(regexp="[A-Za-z0-9_-]{36}") String presentationId,
         @NotBlank @Pattern(regexp="[A-Za-z0-9_-]{8,64}") String requestId) {
     public enum Action { ANSWER, REVEAL }

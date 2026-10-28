@@ -5,15 +5,13 @@ import java.util.regex.Pattern;
 
 public final class DictationPolicy {
     private DictationPolicy() {}
-    public static final int MAX_ATTEMPTS=6;
-    public record Outcome(String verdict,boolean hadFailure,int correctStreak,boolean done,String completionReason) {}
-    public static Outcome answer(String target,String input,boolean reveal,boolean failed,int streak,int attempt) {
+    public static final int MAX_ATTEMPTS=1;
+    public record Outcome(String verdict,boolean hadFailure,int correctStreak,String completionReason) {}
+    public static Outcome answer(String target,String input,boolean reveal) {
         boolean correct=!reveal && target.strip().toLowerCase(Locale.ROOT).equals(input.strip().toLowerCase(Locale.ROOT));
-        failed=failed || !correct; streak=correct?streak+1:0;
-        boolean passed=correct && (!failed || streak>=2);
-        boolean done=passed || attempt>=MAX_ATTEMPTS;
-        return new Outcome(reveal?"REVEALED":correct?"CORRECT":"INCORRECT",failed,streak,done,
-            passed?"RECALLED":done?"LIMIT_REACHED":null);
+        // Existing storage reasons remain valid: the single allowed attempt is now exhausted.
+        return new Outcome(reveal?"REVEALED":correct?"CORRECT":"INCORRECT",!correct,correct?1:0,
+            correct?"RECALLED":"LIMIT_REACHED");
     }
     public static String prompt(String translation,String target) {
         return Pattern.compile("(?<![\\p{IsLatin}\\p{N}_])"+Pattern.quote(target)+"(?![\\p{IsLatin}\\p{N}_])",
