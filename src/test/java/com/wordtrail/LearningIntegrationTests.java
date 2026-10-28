@@ -1670,7 +1670,7 @@ class LearningIntegrationTests {
     }
 
     @Test void continuedDailyAppendFailureRollsBackWithoutTouchingCompletedItemsAndHistory() throws Exception {
-        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); finishDailyWithKnown(batch);
+        allocation(0,1); joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(); finishDailyWithKnown(batch);
         joinPlan(wordIds.get(2)); String queue=batchSnapshot(batch),memory=stateSnapshot();
         for(String mapper:List.of("LearningBatchItemMapper","LearningBatchMapper")) {
             probe.failAfterMapper="com.wordtrail.learning.mapper."+mapper;
@@ -3100,17 +3100,174 @@ class LearningIntegrationTests {
         return client.send(builder.build(),HttpResponse.BodyHandlers.ofByteArray());
     }
 
-    @Test void expansionAllocationReservesNewWordsAndCapsReviewBacklogForTheWholeDay() throws Exception {
+    @Test void expansionAllocationReservesBothSourcesInEachRoundAndAllowsContinuation() throws Exception {
         joinPlan(wordIds.get(0),wordIds.get(1),wordIds.get(2),wordIds.get(3));
         for(int index=0;index<2;index++) { var value=state(a,wordIds.get(index)); value.setFirstLearnedAt(statisticsDate().minusDays(3).atStartOfDay()); value.setNextReviewAt(statisticsDate().minusDays(2-index).atStartOfDay()); states.update(value); }
         var preference=allocation(1,1); assertEquals(2,preference.get("dailyTarget").asInt());
         var task=startDay(); long batch=task.get("batchId").asLong(); assertEquals(1,task.get("newCount").asInt()); assertEquals(1,task.get("reviewCount").asInt());
         assertEquals(1,task.get("newWordTarget").asInt()); assertEquals(1,task.get("reviewLimit").asInt());
         while(!get(dailyPath(batch),tokenA).get("nextItemId").isNull()) { var q=trainingQuestion(batch,null); train(batch,q,null,1); }
-        var today=get("/api/learning/today",tokenA); assertFalse(today.get("canAddMore").asBoolean()); assertEquals(1,today.get("reviewBacklogCount").asInt());
-        assertEquals(1,today.get("overdueReviewCount").asInt()); assertEquals(2,startDay().get("totalCount").asInt());
+        var today=get("/api/learning/today",tokenA); assertTrue(today.get("canAddMore").asBoolean()); assertEquals(1,today.get("reviewBacklogCount").asInt());
+        assertFalse(today.get("needsMoreWords").asBoolean()); assertEquals(1,today.get("overdueReviewCount").asInt());
+        var continued=startDay(); assertEquals(4,continued.get("totalCount").asInt());
+        assertEquals(2,continued.get("newCount").asInt()); assertEquals(2,continued.get("reviewCount").asInt());
+        assertEquals(batch,continued.get("batchId").asLong()); finishDailyWithKnown(batch);
         allocation(2,2); assertEquals(1,get(dailyPath(batch),tokenA).get("newWordTarget").asInt());
         advanceDays(1); var tomorrow=startDay(); assertEquals(2,tomorrow.get("newWordTarget").asInt()); assertEquals(2,tomorrow.get("reviewLimit").asInt());
+    }
+
+    private void makeDue(Long... ids) {
+        for(long id:ids) {
+            var value=state(a,id); value.setFirstLearnedAt(statisticsDate().minusDays(10).atStartOfDay());
+            value.setNextReviewAt(statisticsDate().minusDays(1).atStartOfDay()); states.update(value);
+        }
+    }
+
+    @Test void allocationFillsMissingNewWordsWithDueReviewsAndKeepsReviewOrder() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        makeDue(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        var oldest=state(a,wordIds.get(5)); oldest.setNextReviewAt(statisticsDate().minusDays(20).atStartOfDay()); states.update(oldest);
+        allocation(2,2); String memory=stateSnapshot(); var task=startDay(); long batch=task.get("batchId").asLong();
+        assertEquals(4,task.get("reviewCount").asInt()); assertEquals(0,task.get("newCount").asInt());
+        assertEquals(wordIds.get(5),batchDetails(batch).getFirst().getWordId()); assertEquals(memory,stateSnapshot());
+        assertEquals(task,startDay()); finishDailyWithKnown(batch);
+        assertTrue(get("/api/learning/today",tokenA).get("canAddMore").asBoolean());
+        var more=startDay(); assertEquals(batch,more.get("batchId").asLong()); assertEquals(5,more.get("totalCount").asInt());
+        assertEquals(5,more.get("reviewCount").asInt()); finishDailyWithKnown(batch);
+        assertTrue(get("/api/learning/today",tokenA).get("needsMoreWords").asBoolean());
+        assertEquals(5,batchDetails(batch).stream().map(LearningBatchItem::getWordId).distinct().count());
+    }
+
+    @Test void allocationFillsMissingReviewsWithNewWordsAndPreservesJoinOrder() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        allocation(2,2); var task=startDay(); long batch=task.get("batchId").asLong();
+        assertEquals(4,task.get("newCount").asInt()); assertEquals(0,task.get("reviewCount").asInt());
+        assertEquals(wordIds.subList(1,5),batchDetails(batch).stream().map(LearningBatchItem::getWordId).toList());
+        assertFalse(get("/api/learning/today",tokenA).get("needsMoreWords").asBoolean());
+        finishDailyWithKnown(batch); var old=batchDetails(batch).stream().map(json::valueToTree).toList();
+        var more=startDay(); assertEquals(5,more.get("newCount").asInt()); assertEquals(5,more.get("totalCount").asInt());
+        assertEquals(old,batchDetails(batch).subList(0,4).stream().map(json::valueToTree).toList());
+        finishDailyWithKnown(batch); assertFalse(get("/api/learning/today",tokenA).get("canAddMore").asBoolean());
+    }
+
+    @Test void allNewPreferenceFallsBackToReviewsEvenWhenReviewPreferenceIsZero() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); makeDue(wordIds.get(1),wordIds.get(2));
+        allocation(2,0); var task=startDay(); assertEquals(2,task.get("reviewCount").asInt());
+        assertEquals(0,task.get("newCount").asInt()); assertEquals(0,task.get("reviewLimit").asInt());
+        finishDailyWithKnown(task.get("batchId").asLong()); assertTrue(insightSummary("DAILY").at("/goal/reached").asBoolean());
+    }
+
+    @Test void partiallyMissingNewWordsUseExtraReviewsWithoutDiscardingAvailableNewWords() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        makeDue(wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5)); allocation(2,2);
+        var task=startDay(); assertEquals(4,task.get("totalCount").asInt());
+        assertEquals(1,task.get("newCount").asInt()); assertEquals(3,task.get("reviewCount").asInt());
+        assertTrue(batchDetails(task.get("batchId").asLong()).stream().anyMatch(i->i.getWordId().equals(wordIds.get(1))));
+    }
+
+    @Test void partiallyMissingReviewsUseExtraNewWordsWithoutDiscardingAvailableReviews() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        makeDue(wordIds.get(5)); allocation(2,2); var task=startDay();
+        assertEquals(4,task.get("totalCount").asInt()); assertEquals(3,task.get("newCount").asInt());
+        assertEquals(1,task.get("reviewCount").asInt());
+        assertEquals(wordIds.get(5),batchDetails(task.get("batchId").asLong()).getFirst().getWordId());
+    }
+
+    @Test void allReviewPreferenceFallsBackToNewWordsEvenWhenNewPreferenceIsZero() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2)); allocation(0,2); var task=startDay();
+        assertEquals(2,task.get("newCount").asInt()); assertEquals(0,task.get("reviewCount").asInt());
+        assertEquals(0,task.get("newWordTarget").asInt());
+        finishDailyWithKnown(task.get("batchId").asLong()); assertTrue(insightSummary("DAILY").at("/goal/reached").asBoolean());
+    }
+
+    @Test void insufficientWordsPromptAddingToPlanUntilOriginalDailyGoalIsReached() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3)); makeDue(wordIds.get(3)); allocation(10,10);
+        var task=startDay(); long batch=task.get("batchId").asLong();
+        assertEquals(3,task.get("totalCount").asInt()); assertEquals(2,task.get("newCount").asInt());
+        assertEquals(1,task.get("reviewCount").asInt()); assertEquals(20,task.get("dailyTarget").asInt());
+        var initial=insightSummary("DAILY").get("goal");
+        assertEquals(20,initial.get("remainingCount").asInt()); assertFalse(initial.get("reached").asBoolean());
+        finishDailyWithKnown(batch); var goal=insightSummary("DAILY").get("goal");
+        assertFalse(goal.get("reached").asBoolean()); assertEquals(17,goal.get("remainingCount").asInt());
+        assertEquals(20,goal.get("dailyTarget").asInt());
+        assertEquals(20,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
+        var today=get("/api/learning/today",tokenA); assertFalse(today.get("canAddMore").asBoolean()); assertTrue(today.get("needsMoreWords").asBoolean());
+        String memory=stateSnapshot(),queue=batchSnapshot(batch); int writes=probe.writes.get();
+        assertEquals(today.get("task"),startDay()); assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(batch));
+        assertEquals(writes,probe.writes.get());
+        joinPlan(wordIds.get(4)); assertFalse(get("/api/learning/today",tokenA).get("needsMoreWords").asBoolean());
+        assertEquals(4,startDay().get("totalCount").asInt()); finishDailyWithKnown(batch);
+        assertFalse(insightSummary("DAILY").at("/goal/reached").asBoolean());
+        assertEquals(16,insightSummary("DAILY").at("/goal/remainingCount").asInt());
+        var added=new ArrayList<Long>();
+        for(int index=0;index<16;index++) {
+            long id=word(prefix+"_complete_goal_"+index); associate(systemBook,id,100+index); added.add(id);
+        }
+        joinPlan(added.toArray(Long[]::new)); assertEquals(20,startDay().get("totalCount").asInt()); finishDailyWithKnown(batch);
+        assertTrue(insightSummary("DAILY").at("/goal/reached").asBoolean());
+        assertEquals(0,insightSummary("DAILY").at("/goal/remainingCount").asInt());
+    }
+
+    @Test void exhaustedPlanPromptsAddingWordsWithoutStartingOrInventingACompletedGoal() throws Exception {
+        allocation(10,10); long before=countBatches(); int writes=probe.writes.get();
+        var today=get("/api/learning/today",tokenA); assertTrue(today.get("needsMoreWords").asBoolean());
+        assertFalse(today.get("canAddMore").asBoolean()); assertTrue(today.get("task").isNull());
+        assertFalse(insightSummary("DAILY").at("/goal/reached").asBoolean());
+        var response=call("POST","/api/learning/today/start",null,tokenA);
+        assertEquals(409,response.statusCode()); assertEquals("NO_DAILY_WORDS",json.readTree(response.body()).get("code").asText());
+        assertTrue(json.readTree(response.body()).get("message").asText().contains("请添加单词"));
+        assertEquals(before,countBatches()); assertEquals(writes,probe.writes.get());
+    }
+
+    @Test void fallbackExcludesFuturePausedRemovedAndOtherUsersWords() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4),wordIds.get(5));
+        makeDue(wordIds.get(2),wordIds.get(4),wordIds.get(5));
+        var future=state(a,wordIds.get(2)); future.setNextReviewAt(statisticsDate().plusDays(1).atStartOfDay()); states.update(future);
+        planManagementStatus("PAUSED",wordIds.get(3)); planManagementStatus("REMOVED",wordIds.get(4));
+        allocation(5,5); String memory=stateSnapshot(); var task=startDay(); long batch=task.get("batchId").asLong();
+        assertEquals(List.of(wordIds.get(5),wordIds.get(1)),batchDetails(batch).stream().map(LearningBatchItem::getWordId).toList());
+        assertEquals(memory,stateSnapshot()); finishDailyWithKnown(batch);
+        var today=get("/api/learning/today",tokenA); assertTrue(today.get("needsMoreWords").asBoolean());
+        assertEquals(0,today.get("unassignedCount").asInt()); assertFalse(today.get("canAddMore").asBoolean());
+        assertEquals(0,get("/api/learning/today",tokenB).get("unassignedCount").asInt());
+    }
+
+    @Test void allocatedContinuationCanExceed200WordsWithFallbackAndNoDuplicateScheduling() throws Exception {
+        var selected=new ArrayList<Long>();
+        for(int index=0;index<205;index++) {
+            long id=word(prefix+"_unlimited_"+index); associate(systemBook,id,100+index); selected.add(id);
+        }
+        joinPlan(selected.subList(0,100).toArray(Long[]::new)); joinPlan(selected.subList(100,200).toArray(Long[]::new));
+        joinPlan(selected.subList(200,205).toArray(Long[]::new)); allocation(50,50);
+        long batch=startDay().get("batchId").asLong(); finishDailyWithKnown(batch);
+        assertEquals(100,batchDetails(batch).size()); assertTrue(get("/api/learning/today",tokenA).get("canAddMore").asBoolean());
+        var old=batchDetails(batch).stream().map(json::valueToTree).toList();
+        assertEquals(200,startDay().get("totalCount").asInt()); finishDailyWithKnown(batch);
+        assertEquals(205,startDay().get("totalCount").asInt()); finishDailyWithKnown(batch);
+        assertEquals(old,batchDetails(batch).subList(0,100).stream().map(json::valueToTree).toList());
+        assertEquals(205,batchDetails(batch).stream().map(LearningBatchItem::getWordId).distinct().count());
+        assertStatistics(statisticsDaily(statisticsDate()),205,205,205,0,0);
+        var goal=insightSummary("DAILY").get("goal"); assertTrue(goal.get("reached").asBoolean());
+        assertEquals(100,goal.get("dailyTarget").asInt()); assertEquals(0,goal.get("remainingCount").asInt());
+        assertTrue(get("/api/learning/today",tokenA).get("needsMoreWords").asBoolean());
+        assertEquals(1,get("/api/learning/daily-tasks?status=COMPLETED",tokenA).get("total").asInt());
+    }
+
+    @Test void allocatedConcurrentContinuationUsesOneRoundAndKeepsOriginalPreferences() throws Exception {
+        joinPlan(wordIds.get(1),wordIds.get(2),wordIds.get(3),wordIds.get(4)); allocation(1,1);
+        long batch=startDay().get("batchId").asLong(); finishDailyWithKnown(batch); allocation(2,2);
+        var gate=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var first=pool.submit(()->{gate.await();return call("POST","/api/learning/today/start",null,tokenA);});
+            var second=pool.submit(()->{gate.await();return call("POST","/api/learning/today/start",null,tokenA);});
+            gate.countDown(); var one=first.get(15,TimeUnit.SECONDS); var two=second.get(15,TimeUnit.SECONDS);
+            assertEquals(200,one.statusCode()); assertEquals(200,two.statusCode()); assertEquals(data(one),data(two));
+        }
+        var continued=get(dailyPath(batch),tokenA); assertEquals(4,continued.get("totalCount").asInt());
+        assertEquals(1,continued.get("newWordTarget").asInt()); assertEquals(1,continued.get("reviewLimit").asInt());
+        assertEquals(4,batchDetails(batch).stream().map(LearningBatchItem::getWordId).distinct().count());
+        finishDailyWithKnown(batch); advanceDays(1);
+        assertEquals(2,startDay().get("newWordTarget").asInt());
     }
 
     @Test void expansionZeroReviewQuotaAndLegacyTargetUpdatesRemainCompatibleAndPrivate() throws Exception {

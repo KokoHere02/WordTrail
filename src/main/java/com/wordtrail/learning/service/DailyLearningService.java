@@ -68,15 +68,14 @@ public class DailyLearningService {
         var allocation=batch==null?settings.allocation(userId):null;
         Integer newTarget=batch==null?(allocation==null?null:allocation.getNewWordTarget()):batch.getNewWordTarget();
         Integer reviewLimit=batch==null?(allocation==null?null:allocation.getReviewLimit()):batch.getReviewLimit();
-        boolean capacity=newTarget==null?unassigned>0:
-            backlog>0 && entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count()<reviewLimit
-            || pendingNew>0 && entries.stream().filter(i->"NEW".equals(i.getItemType())).count()<newTarget;
+        boolean completed=batch!=null && "COMPLETED".equals(batch.getStatus());
+        boolean needsMoreWords=unassigned==0 && (batch==null || completed);
         return new TodayVO(now.toLocalDate(), target, states.selectCountByQuery(active(userId)),
             states.selectCountByQuery(due(userId, now)),
             states.selectCountByQuery(active(userId).and(column("first_learned_at").isNull())),
-            unassigned,batch!=null && "COMPLETED".equals(batch.getStatus()) && capacity,
+            unassigned,completed && unassigned>0,
             batch==null ? null : view(batch, entries),backlog,
-            states.selectCountByQuery(due(userId,now).and(column("next_review_at").lt(now.toLocalDate().atStartOfDay()))),newTarget,reviewLimit);
+            states.selectCountByQuery(due(userId,now).and(column("next_review_at").lt(now.toLocalDate().atStartOfDay()))),newTarget,reviewLimit,needsMoreWords);
     }
 
     @Transactional
@@ -97,7 +96,7 @@ public class DailyLearningService {
         var allocation=settings.allocation(userId);
         Integer newTarget=allocation==null?null:allocation.getNewWordTarget(),reviewLimit=allocation==null?null:allocation.getReviewLimit();
         var selection=selectWords(userId,now,target,List.of(),newTarget,reviewLimit);
-        if(selection.words().isEmpty()) { throw conflict("NO_DAILY_WORDS", "今日没有到期复习词或待学新词"); }
+        if(selection.words().isEmpty()) { throw conflict("NO_DAILY_WORDS", "当前没有待学新词或到期复习词，请添加单词到学习计划后继续学习"); }
         var batch=new LearningBatch(); batch.setUserId(userId); batch.setTaskType("DAILY");
         batch.setSelectionType("DAILY"); batch.setStatus("IN_PROGRESS"); batch.setLearningDate(date);
         batch.setDailyTarget(target); batch.setCreatedAt(now); batch.setUpdatedAt(now);
@@ -121,15 +120,19 @@ public class DailyLearningService {
     }
     private record Selection(List<UserWordState> words,int reviews) {}
     private Selection selectWords(long userId,LocalDateTime now,int limit,List<LearningBatchItem> entries,Integer newTarget,Integer reviewLimit) {
-        int reviewsAllowed=reviewLimit==null?limit:Math.max(0,reviewLimit-(int)entries.stream().filter(i->"REVIEW".equals(i.getItemType())).count());
-        var selected=reviewsAllowed==0?new ArrayList<UserWordState>():new ArrayList<>(states.selectListByQuery(excluding(due(userId,now),entries)
-            .orderBy(column("next_review_at").asc(),column("id").asc()).limit(reviewsAllowed)));
-        int reviews=selected.size();
-        int newAllowed=newTarget==null?limit-reviews:Math.max(0,newTarget-(int)entries.stream().filter(i->"NEW".equals(i.getItemType())).count());
-        if(newAllowed>0) {
-            selected.addAll(states.selectListByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries)
-                .orderBy(column("joined_at").asc(),column("id").asc()).limit(newAllowed)));
-        }
+        // Preferences apply to each round. Existing items are excluded across all rounds,
+        // while either source can fill the other source's shortage, including a zero preference.
+        var reviewWords=states.selectListByQuery(excluding(due(userId,now),entries)
+            .orderBy(column("next_review_at").asc(),column("id").asc()).limit(limit));
+        var newWords=states.selectListByQuery(excluding(active(userId).and(column("first_learned_at").isNull()),entries)
+            .orderBy(column("joined_at").asc(),column("id").asc()).limit(limit));
+        int reviews=Math.min(reviewLimit==null?limit:reviewLimit,reviewWords.size());
+        int fresh=Math.min(newTarget==null?limit-reviews:newTarget,newWords.size());
+        int extraReviews=Math.min(limit-reviews-fresh,reviewWords.size()-reviews);
+        reviews+=extraReviews;
+        fresh+=Math.min(limit-reviews-fresh,newWords.size()-fresh);
+        var selected=new ArrayList<>(reviewWords.subList(0,reviews));
+        selected.addAll(newWords.subList(0,fresh));
         return new Selection(selected,reviews);
     }
     private void appendItems(LearningBatch batch,List<LearningBatchItem> entries,Selection selection) {
