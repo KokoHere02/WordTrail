@@ -20,7 +20,7 @@ public class DictationController {
     @GetMapping("/batches/{batchId}")
     public ApiResponse<DictationTaskVO> progress(@PathVariable @Positive long batchId) { return ApiResponse.ok(dictation.progress(batchId)); }
     @PostMapping("/batches/{batchId}/next")
-    public ApiResponse<DictationQuestionVO> next(@PathVariable @Positive long batchId,@RequestBody(required=false) RelearnRequest request) { return ApiResponse.ok(dictation.next(batchId)); }
+    public ApiResponse<DictationQuestionVO> next(@PathVariable @Positive long batchId,@RequestBody(required=false) EmptyRequest request) { return ApiResponse.ok(dictation.next(batchId)); }
     @PutMapping("/batches/{batchId}/items/{itemId}/answer")
     public ApiResponse<DictationAnswerVO> answer(@PathVariable @Positive long batchId,@PathVariable @Positive long itemId,@Valid @RequestBody DictationAnswerRequest request) { return ApiResponse.ok(dictation.answer(batchId,itemId,request)); }
     @GetMapping("/batches/{batchId}/result/words")

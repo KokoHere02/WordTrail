@@ -18,7 +18,7 @@ public class DailyLearningController {
         return ApiResponse.ok(daily.history(query));
     }
     @PostMapping("/api/learning/today/start") public ApiResponse<DailyTaskVO> start(
-            @RequestBody(required=false) RelearnRequest empty) { return ApiResponse.ok(daily.start()); }
+            @RequestBody(required=false) EmptyRequest empty) { return ApiResponse.ok(daily.start()); }
     @GetMapping("/api/learning-batches/{batchId}/daily")
     public ApiResponse<DailyTaskVO> progress(@PathVariable @Positive long batchId) { return ApiResponse.ok(daily.progress(batchId)); }
     @GetMapping("/api/learning-batches/{batchId}/daily/items/{itemId}")
