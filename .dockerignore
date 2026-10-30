@@ -1,0 +1,14 @@
+.git
+.github
+.idea
+.local
+.mvn
+backups
+target
+docs
+*.md
+*.log
+.env
+.env.*
+docker-compose*.yml
+src/test

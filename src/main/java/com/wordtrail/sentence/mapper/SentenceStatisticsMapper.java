@@ -13,10 +13,11 @@ public interface SentenceStatisticsMapper {
         """)
     Totals totals(@Param("userId") long userId);
     @Select("""
-        SELECT COUNT(*) FROM (SELECT learning_date AS d FROM sentence_translation_attempt WHERE user_id=#{userId}
+        SELECT d FROM (SELECT learning_date AS d FROM sentence_translation_attempt WHERE user_id=#{userId}
           UNION SELECT review_date AS d FROM sentence_translation_attempt WHERE user_id=#{userId} AND self_assessment IS NOT NULL) dates
+        ORDER BY d
         """)
-    long learningDays(@Param("userId") long userId);
+    List<LocalDate> learningDates(@Param("userId") long userId);
     @Select("""
         SELECT d AS learning_date,SUM(submissions) AS submission_count,SUM(answers) AS answer_count,
           SUM(reveals) AS reveal_count,SUM(reviews) AS self_review_count FROM (

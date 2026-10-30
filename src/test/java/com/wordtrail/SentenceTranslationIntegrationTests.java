@@ -2,6 +2,8 @@ package com.wordtrail;
 
 import com.mybatisflex.core.query.QueryWrapper;
 import com.wordtrail.learning.entity.UserWordState;
+import com.wordtrail.learning.entity.LearningBatch;
+import com.wordtrail.learning.entity.LearningBatchItem;
 import com.wordtrail.learning.mapper.*;
 import com.wordtrail.security.*;
 import com.wordtrail.sentence.entity.*;
@@ -52,6 +54,8 @@ class SentenceTranslationIntegrationTests {
     @Autowired com.wordtrail.book.mapper.WordBookItemMapper wordBookItems;
     @Autowired WordMapper words;
     @Autowired UserWordStateMapper states;
+    @Autowired LearningBatchMapper learningBatches;
+    @Autowired LearningBatchItemMapper learningItems;
     @Autowired SentenceQuestionMapper questions;
     @Autowired SentenceSessionMapper sessions;
     @Autowired SentenceItemMapper items;
@@ -113,6 +117,10 @@ class SentenceTranslationIntegrationTests {
             }
             sessions.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             states.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
+            var batchIds=learningBatches.selectListByQuery(QueryWrapper.create().where(column("user_id").in(userIds)))
+                .stream().map(LearningBatch::getId).toList();
+            if(!batchIds.isEmpty()) learningItems.deleteByQuery(QueryWrapper.create().where(column("batch_id").in(batchIds)));
+            learningBatches.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             refresh.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
             authSessions.deleteByQuery(QueryWrapper.create().where(column("user_id").in(userIds)));
         }
@@ -155,6 +163,86 @@ class SentenceTranslationIntegrationTests {
     }
     private long countAttempts() { return attempts.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(a))); }
     private long countSessions() { return sessions.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(a))); }
+
+    private LearningBatch recordBatch(long user, String type, String mode, String status, LocalDate date, LocalDateTime created) {
+        var batch=new LearningBatch(); batch.setUserId(user); batch.setTaskType(type);
+        batch.setSelectionType(type.equals("DAILY")?"DAILY":"MANUAL");
+        batch.setPracticeMode(type.equals("DAILY")?"RECOGNITION":"DICTATION");
+        batch.setStudyMode(mode); batch.setStatus(status); batch.setLearningDate(date);
+        if(date!=null) batch.setDailyTarget(3);
+        batch.setCreatedAt(created); batch.setUpdatedAt(created);
+        if(status.equals("COMPLETED")) batch.setCompletedAt(created);
+        learningBatches.insertSelective(batch); return batch;
+    }
+    private void recordItem(LearningBatch batch,long word,int order,String type,String status,LocalDateTime now) {
+        var entry=new LearningBatchItem(); entry.setBatchId(batch.getId()); entry.setWordId(word); entry.setSortOrder(order);
+        entry.setQueueOrder((long)order); entry.setItemType(type); entry.setLearningStatus(status);
+        if(status.equals("SKIPPED")) { entry.setStatusBeforeSkip("PENDING"); entry.setSkippedAt(now); }
+        learningItems.insertSelective(entry);
+    }
+
+    @Test void combinedLearningRecordsFilterPageAndPreserveModuleSemantics() throws Exception {
+        var now=LocalDateTime.ofInstant(clock.instant(),ZoneId.of("Asia/Shanghai")).withNano(0);
+        var today=now.toLocalDate();
+        var another=new Word(); another.setWord(prefix+"records"); another.setTranslation("record"); words.insertSelective(another); extraWords.add(another.getId());
+        var daily=recordBatch(a,"DAILY","RECOGNITION","COMPLETED",today,now);
+        recordItem(daily,wordId,1,"NEW","DONE",now); recordItem(daily,another.getId(),2,"REVIEW","SKIPPED",now);
+        var expired=recordBatch(a,"DAILY","RECOGNITION","IN_PROGRESS",today.minusDays(1),now.minusDays(1));
+        recordItem(expired,wordId,1,"NEW","PENDING",now);
+        var test=recordBatch(a,"PRACTICE","DICTATION","IN_PROGRESS",null,now);
+        recordItem(test,wordId,1,null,"DONE",now); recordItem(test,another.getId(),2,null,"PENDING",now);
+        var legacy=recordBatch(a,"PRACTICE","RECOGNITION","IN_PROGRESS",null,now.minusHours(1));
+        recordItem(legacy,wordId,1,null,"PENDING",now);
+        var other=recordBatch(b,"DAILY","RECOGNITION","IN_PROGRESS",today,now.plusSeconds(1));
+        recordItem(other,wordId,1,"NEW","PENDING",now);
+        long session=create(questionIds.get(0),questionIds.get(1));
+        long first=current(session).get("itemId").asLong(); submit(session,first,answer("records_submit"));
+
+        String endpoint="/api/learning/records";
+        var all=ok("GET",endpoint,null,tokenA,200); assertEquals(5,all.get("total").asLong());
+        var pageOne=ok("GET",endpoint+"?size=2&page=1",null,tokenA,200);
+        var pageTwo=ok("GET",endpoint+"?size=2&page=2",null,tokenA,200);
+        var pageThree=ok("GET",endpoint+"?size=2&page=3",null,tokenA,200);
+        var combined=new ArrayList<String>();
+        for(var page:List.of(pageOne,pageTwo,pageThree)) for(var row:page.get("records"))
+            combined.add(row.get("type").asString()+":"+row.get("businessId").asLong());
+        var full=new ArrayList<String>();
+        for(var row:all.get("records")) full.add(row.get("type").asString()+":"+row.get("businessId").asLong());
+        assertEquals(full,combined); assertEquals(5,new HashSet<>(combined).size());
+        assertEquals(List.of("DAILY:"+daily.getId(),"DICTATION:"+test.getId(),"SENTENCE:"+session),full.subList(0,3));
+
+        var dailyRow=ok("GET",endpoint+"?type=DAILY&status=COMPLETED",null,tokenA,200).get("records").get(0);
+        assertEquals(1,dailyRow.get("completedCount").asLong()); assertEquals(2,dailyRow.get("totalCount").asLong());
+        assertEquals(1,dailyRow.get("skippedCount").asLong()); assertEquals(1,dailyRow.get("newCount").asLong());
+        assertEquals(1,dailyRow.get("reviewCount").asLong()); assertEquals(3,dailyRow.get("dailyTarget").asInt());
+        assertFalse(dailyRow.get("goalReached").asBoolean()); assertFalse(dailyRow.get("canContinue").asBoolean());
+        var incomplete=ok("GET",endpoint+"?status=INCOMPLETE",null,tokenA,200);
+        assertEquals(2,incomplete.get("total").asLong());
+        for(var row:incomplete.get("records")) { assertEquals("IN_PROGRESS",row.get("rawStatus").asString()); assertFalse(row.get("canContinue").asBoolean()); }
+        var dictation=ok("GET",endpoint+"?type=DICTATION&status=IN_PROGRESS",null,tokenA,200).get("records").get(0);
+        assertTrue(dictation.get("singleAttempt").asBoolean()); assertTrue(dictation.get("canContinue").asBoolean());
+        assertTrue(dictation.get("source").isNull()); assertEquals(1,dictation.get("completedCount").asLong());
+        var sentence=ok("GET",endpoint+"?type=SENTENCE",null,tokenA,200).get("records").get(0);
+        assertEquals("BANK",sentence.get("source").asString()); assertEquals(0,sentence.get("completedCount").asLong());
+        assertEquals(2,sentence.get("totalCount").asLong()); assertTrue(sentence.get("canContinue").asBoolean());
+        assess(session,first,"records_review","PARTIAL");
+        assertEquals(1,ok("GET",endpoint+"?type=SENTENCE",null,tokenA,200).get("records").get(0).get("completedCount").asLong());
+        assertEquals(1,ok("GET",endpoint,null,tokenB,200).get("total").asLong());
+        assertEquals(0,ok("GET",endpoint+"?page=2147483647",null,tokenA,200).get("records").size());
+        assertEquals(400,call("GET",endpoint+"?size=101",null,tokenA).statusCode());
+        assertEquals(400,call("GET",endpoint+"?type=INVALID",null,tokenA).statusCode());
+        assertEquals(401,call("GET",endpoint,null,null).statusCode());
+
+        daily.setStatus("IN_PROGRESS"); daily.setDailyTarget(1); learningBatches.update(daily);
+        var active=ok("GET",endpoint+"?type=DAILY&status=IN_PROGRESS",null,tokenA,200).get("records").get(0);
+        assertTrue(active.get("canContinue").asBoolean()); assertTrue(active.get("goalReached").asBoolean());
+        test.setStatus("ABANDONED"); learningBatches.update(test);
+        var abandoned=ok("GET",endpoint+"?type=DICTATION&status=ABANDONED",null,tokenA,200).get("records").get(0);
+        assertEquals("ABANDONED",abandoned.get("rawStatus").asString()); assertFalse(abandoned.get("canContinue").asBoolean());
+        clock.advanceSeconds(86400); tokenA=jwt.issue(a);
+        var expiredDaily=ok("GET",endpoint+"?type=DAILY&status=INCOMPLETE",null,tokenA,200);
+        assertEquals(2,expiredDaily.get("total").asLong()); assertFalse(expiredDaily.get("records").get(0).get("canContinue").asBoolean());
+    }
 
     @Test void questionDiscoveryHidesAllReferencesAndSupportsPagingAndLinkedWordFilter() throws Exception {
         var page=get("/questions?wordId="+wordId+"&size=1"); assertEquals(2,page.get("total").asLong());
@@ -513,6 +601,63 @@ class SentenceTranslationIntegrationTests {
         assertEquals(1,stats.get("days").get(0).get("submissionCount").asLong());assertEquals(0,stats.get("days").get(0).get("selfReviewCount").asLong());
         assertEquals(0,stats.get("days").get(1).get("submissionCount").asLong());assertEquals(1,stats.get("days").get(1).get("selfReviewCount").asLong());
         assertEquals("2026-10-26",get("/questions/"+questionIds.get(0)+"/schedule").get("nextReviewDate").asString());
+    }
+
+    @Test void sentenceCalendarStreakAndDateDetailsFollowRealActivityAcrossMidnight() throws Exception {
+        clock.at(Instant.parse("2024-02-28T15:59:50Z")); tokenA=jwt.issue(a); tokenB=jwt.issue(b);
+        ok("POST",BASE+"/sessions",Map.of("sentenceIds",List.of(questionIds.get(2))),tokenB,201);
+        long session=create(questionIds.get(0),questionIds.get(1)),first=current(session).get("itemId").asLong();
+        submit(session,first,answer("calendar_first_submit"));
+        clock.advanceSeconds(20); assess(session,first,"calendar_first_review","PARTIAL");
+        long second=current(session).get("itemId").asLong();
+        submit(session,second,Map.of("action","REVEAL","requestId","calendar_second_submit"));
+        assess(session,second,"calendar_second_review","UNDERSTOOD");
+
+        var overview=get("/statistics?days=2");
+        assertEquals(2,overview.get("learningDayCount").asLong()); assertEquals(2,overview.get("currentStreak").asLong());
+        assertEquals(2,overview.get("longestStreak").asLong());
+        var calendar=get("/statistics/calendar?month=2024-02"); assertEquals("2024-02",calendar.get("month").asString());
+        assertEquals(29,calendar.get("days").size());
+        var empty=calendar.get("days").get(0); assertEquals("2024-02-01",empty.get("date").asString());
+        assertFalse(empty.get("hasActivity").asBoolean());
+        var firstDay=calendar.get("days").get(27); var secondDay=calendar.get("days").get(28);
+        assertTrue(firstDay.get("hasActivity").asBoolean()); assertEquals(1,firstDay.get("submissionCount").asLong());
+        assertEquals(1,firstDay.get("answerCount").asLong()); assertEquals(0,firstDay.get("selfReviewCount").asLong());
+        assertTrue(secondDay.get("hasActivity").asBoolean()); assertEquals(1,secondDay.get("submissionCount").asLong());
+        assertEquals(1,secondDay.get("revealCount").asLong()); assertEquals(2,secondDay.get("selfReviewCount").asLong());
+        assertEquals(firstDay,get("/statistics/daily?date=2024-02-28"));
+        assertEquals(secondDay,get("/statistics/daily?date=2024-02-29"));
+        assertFalse(get("/statistics/daily?date=2024-02-27").get("hasActivity").asBoolean());
+
+        var firstDetails=get("/statistics/attempts?date=2024-02-28"); assertEquals(1,firstDetails.get("total").asLong());
+        var before=firstDetails.get("records").get(0); assertTrue(before.get("submittedOnDate").asBoolean());
+        assertFalse(before.get("reviewedOnDate").asBoolean()); assertEquals("2024-02-29",before.get("reviewDate").asString());
+        var details=get("/statistics/attempts?date=2024-02-29&size=1");
+        var next=get("/statistics/attempts?date=2024-02-29&size=1&page=2");
+        assertEquals(2,details.get("total").asLong()); assertEquals(2,next.get("total").asLong());
+        var sameDay=details.get("records").get(0); var reviewOnly=next.get("records").get(0);
+        assertEquals(second,sameDay.get("itemId").asLong()); assertTrue(sameDay.get("submittedOnDate").asBoolean());
+        assertTrue(sameDay.get("reviewedOnDate").asBoolean()); assertEquals("REVEAL",sameDay.get("action").asString());
+        assertEquals(first,reviewOnly.get("itemId").asLong()); assertFalse(reviewOnly.get("submittedOnDate").asBoolean());
+        assertTrue(reviewOnly.get("reviewedOnDate").asBoolean()); assertEquals(before.get("attemptId"),reviewOnly.get("attemptId"));
+        assertEquals(0,get("/statistics/attempts?date=2024-02-29&page=2147483647").get("records").size());
+        assertEquals(0,ok("GET",BASE+"/statistics/attempts?date=2024-02-29",null,tokenB,200).get("total").asLong());
+        assertEquals(0,ok("GET",BASE+"/statistics",null,tokenB,200).get("currentStreak").asLong());
+        assertFalse(ok("GET",BASE+"/statistics/daily?date=2024-02-29",null,tokenB,200).get("hasActivity").asBoolean());
+        error("GET","/statistics/calendar?month=2024-13",null,tokenA,400,"INVALID_PARAMETER");
+        error("GET","/statistics/daily?date=2024-02-30",null,tokenA,400,"INVALID_PARAMETER");
+        error("GET","/statistics/attempts?date=2024-02-29&size=101",null,tokenA,400,"INVALID_PARAMETER");
+        error("GET","/statistics/attempts",null,null,401,"UNAUTHENTICATED");
+
+        clock.at(Instant.parse("2024-03-01T08:00:00Z")); tokenA=jwt.issue(a);
+        assertEquals(2,get("/statistics").get("currentStreak").asLong());
+        clock.advanceSeconds(86400); tokenA=jwt.issue(a); var stale=get("/statistics");
+        assertEquals(0,stale.get("currentStreak").asLong()); assertEquals(2,stale.get("longestStreak").asLong());
+        assertEquals("2024-03",get("/statistics/calendar").get("month").asString());
+        assertEquals("2024-03-02",get("/statistics/daily").get("date").asString());
+        finish(create(questionIds.get(0)),"PARTIAL","calendar_restart");
+        var restarted=get("/statistics"); assertEquals(1,restarted.get("currentStreak").asLong());
+        assertEquals(2,restarted.get("longestStreak").asLong());
     }
 
     @Test void statisticsCountTypedAnswersAndRevealsOnceAndQueriesStayReadOnlyAndBounded() throws Exception {
