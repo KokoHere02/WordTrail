@@ -1,0 +1,15 @@
+services:
+  web:
+    build:
+      context: ${WORDTRAIL_WEB_DIR:?Set WORDTRAIL_WEB_DIR}
+      dockerfile: ${WORDTRAIL_DEPLOY_DIR:?Set WORDTRAIL_DEPLOY_DIR}/frontend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      - "${WORDTRAIL_DEPLOY_DIR:?Set WORDTRAIL_DEPLOY_DIR}/nginx.conf:/etc/nginx/conf.d/default.conf:ro"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - database
