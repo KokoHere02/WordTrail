@@ -154,6 +154,13 @@ public class BookService {
         return new PageVO<>(request.getPage(), request.getSize(), total, records);
     }
 
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public List<BookWordVO> randomWords(long bookId, int count) {
+        long userId = currentUser.id();
+        requireAccessible(bookId, userId);
+        return items.randomUnplannedWords(bookId, userId, count);
+    }
+
     public WordBook requireAccessible(long bookId, long userId) {
         var book = books.selectOneByQuery(QueryWrapper.create().where(column("id").eq(bookId))
             .and(column("owner_id").isNull().or(column("owner_id").eq(userId))));

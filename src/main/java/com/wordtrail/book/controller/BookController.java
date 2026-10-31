@@ -61,4 +61,10 @@ public class BookController {
                                                 @Valid @ModelAttribute BookWordsQuery query) {
         return ApiResponse.ok(books.words(bookId, query));
     }
+
+    @GetMapping("/{bookId}/words/random")
+    public ApiResponse<java.util.List<BookWordVO>> randomWords(@PathVariable @Positive long bookId,
+            @Valid @ModelAttribute RandomBookWordsQuery query) {
+        return ApiResponse.ok(books.randomWords(bookId, query.getCount()));
+    }
 }

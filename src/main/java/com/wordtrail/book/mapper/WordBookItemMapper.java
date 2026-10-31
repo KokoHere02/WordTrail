@@ -65,6 +65,17 @@ public interface WordBookItemMapper extends BaseMapper<WordBookItem> {
                               @Param("offset") long offset, @Param("limit") int limit);
 
     @Select("""
+        SELECT w.id, w.word, w.phonetic, w.translation, FALSE AS learned, NULL AS lastResult
+        FROM (SELECT bi.word_id FROM word_book_item bi
+              WHERE bi.book_id=#{bookId}
+                AND NOT EXISTS (SELECT 1 FROM user_word_state s WHERE s.user_id=#{userId} AND s.word_id=bi.word_id)
+              ORDER BY RAND() LIMIT #{limit}) chosen
+        JOIN word w ON w.id=chosen.word_id
+        """)
+    List<BookWordVO> randomUnplannedWords(@Param("bookId") long bookId, @Param("userId") long userId,
+                                         @Param("limit") int limit);
+
+    @Select("""
         <script>
         SELECT w.id FROM word_book_item bi
         INNER JOIN word w ON w.id = bi.word_id

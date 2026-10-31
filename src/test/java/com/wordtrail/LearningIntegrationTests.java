@@ -323,6 +323,31 @@ class LearningIntegrationTests {
 
     }
 
+    @Test void randomBookSelectionIsReadOnlyBoundedAndExcludesAllPlanStates() throws Exception {
+        String path = wordsPath(systemBook) + "/random";
+        joinPlan(wordIds.get(1), wordIds.get(2));
+        var paused = states.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(a)).and(column("word_id").eq(wordIds.get(1))));
+        paused.setPlanStatus("PAUSED"); states.update(paused);
+        var removed = states.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(a)).and(column("word_id").eq(wordIds.get(2))));
+        removed.setPlanStatus("REMOVED"); states.update(removed);
+        String before = stateSnapshot();
+        probe.writes.set(0);
+        var result = get(path + "?count=100", tokenA);
+        var selected = ids(result);
+        assertEquals(4, selected.size());
+        assertEquals(4, new HashSet<>(selected).size());
+        assertTrue(selected.stream().allMatch(id -> wordIds.subList(3, 7).contains(id)));
+        assertEquals(2, get(path + "?count=2", tokenA).size());
+        assertEquals(0, get(wordsPath(emptyBook) + "/random", tokenA).size());
+        assertEquals(before, stateSnapshot());
+        assertEquals(0, probe.writes.get());
+        assertEquals(400, call("GET", path + "?count=0", null, tokenA).statusCode());
+        assertEquals(400, call("GET", path + "?count=101", null, tokenA).statusCode());
+        assertEquals(401, call("GET", path, null, null).statusCode());
+        assertEquals(404, call("GET", wordsPath(otherBook) + "/random", null, tokenA).statusCode());
+        assertTrue(ids(get(path, tokenB)).contains(wordIds.get(0)), "other users' plan states must not exclude words");
+    }
+
     @Test void wordOrderPaginationAndUserLearningStateAreCorrect() throws Exception {
         var page = get(wordsPath(systemBook), tokenA);
         assertEquals(7, page.get("total").asLong());
