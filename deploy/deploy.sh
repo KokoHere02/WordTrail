@@ -84,17 +84,44 @@ unset MYSQL_HOST MYSQL_NETWORK MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD JWT_SECR
 COMPOSE+=(--project-directory "$BACKEND_DIR" --env-file "$CONFIG" -f "$BACKEND_DIR/docker-compose.yml" -f "$DEPLOY_DIR/docker-compose.web.yml")
 "${COMPOSE[@]}" config --quiet
 
+if ! docker network inspect "$mysql_network" >/dev/null 2>&1; then
+  docker network create "$mysql_network" >/dev/null
+fi
+if ! docker network inspect -f '{{range .Containers}}{{println .Name}}{{end}}' "$mysql_network" | grep -Fxq -- "$mysql_host"; then
+  docker network connect "$mysql_network" "$mysql_host"
+fi
+
 printf '\n检查数据库；只有空库可以导入 init.sql，现有数据不会被覆盖。\n'
 if [[ -z ${mysql_password:-} ]]; then
   read -r -s -p "请输入 $mysql_user 的 MySQL 密码（不显示）: " mysql_password; printf '\n'
 fi
 [[ -n $mysql_password ]] || die '数据库密码不能为空。'
-mysql=(docker exec -i -e "MYSQL_PWD=$mysql_password" "$mysql_host" mysql --protocol=tcp --host=127.0.0.1 --user="$mysql_user" --database="$mysql_database" --default-character-set=utf8mb4 --batch --skip-column-names)
+# Use the existing MySQL image as a short-lived client on the same network as
+# the backend. This exercises container-to-container grants rather than localhost.
+mysql_image=$(docker inspect -f '{{.Image}}' "$mysql_host")
+export MYSQL_PWD="$mysql_password"
+mysql=(docker run --rm -i --network "$mysql_network" -e MYSQL_PWD --entrypoint mysql "$mysql_image" --protocol=tcp --host="$mysql_host" --user="$mysql_user" --database="$mysql_database" --ssl-mode=DISABLED --get-server-public-key --connect-timeout=10 --default-character-set=utf8mb4 --batch --skip-column-names)
 if ! table_count=$("${mysql[@]}" --execute='SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()'); then
-  unset mysql_password mysql
-  die '连接数据库失败，请检查容器、数据库名、账号和权限。'
+  unset MYSQL_PWD mysql_password mysql
+  die '数据库连接失败：请检查专用账号密码、数据库以及允许 Docker 网络连接的账号授权。'
 fi
+unset MYSQL_PWD
 [[ $table_count =~ ^[0-9]+$ ]] || die '无法确认数据库是否为空，已停止初始化。'
+
+# Save the credential that just succeeded, including after a password retry.
+# Never source the dotenv file, since its contents are not shell code.
+escaped=${mysql_password//\\/\\\\}; escaped=${escaped//\'/\\\'}
+config_tmp=$(mktemp "$DEPLOY_DIR/.env.XXXXXX")
+while IFS= read -r line || [[ -n $line ]]; do
+  if [[ $line == MYSQL_PASSWORD=* ]]; then
+    printf "MYSQL_PASSWORD='%s'\n" "$escaped"
+  else
+    printf '%s\n' "$line"
+  fi
+done < "$CONFIG" > "$config_tmp"
+mv -f -- "$config_tmp" "$CONFIG"
+unset escaped config_tmp
+export MYSQL_PWD="$mysql_password"
 if (( table_count == 0 )); then
   read -r -p "确认向空库 $mysql_database 导入项目初始化结构？输入 YES 继续: " confirm
   if [[ $confirm == YES ]]; then
@@ -114,14 +141,7 @@ elif (( table_count < 25 )); then
 else
   printf '数据库包含 %s 个表或视图，跳过导入，保留现有数据。\n' "$table_count"
 fi
-unset mysql_password mysql
-
-if ! docker network inspect "$mysql_network" >/dev/null 2>&1; then
-  docker network create "$mysql_network" >/dev/null
-fi
-if ! docker network inspect -f '{{range .Containers}}{{println .Name}}{{end}}' "$mysql_network" | grep -Fxq -- "$mysql_host"; then
-  docker network connect "$mysql_network" "$mysql_host"
-fi
+unset MYSQL_PWD mysql_password mysql
 
 printf '\n构建并启动前后端，首次构建需要下载镜像和依赖。\n'
 "${COMPOSE[@]}" up -d --build
