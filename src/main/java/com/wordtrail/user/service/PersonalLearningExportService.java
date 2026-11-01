@@ -18,8 +18,8 @@ public class PersonalLearningExportService {
     private final ObjectMapper json;
     private final Clock clock;
 
-    private static final String SENTENCES="SELECT sentence_id FROM user_sentence_favorite WHERE user_id=? UNION SELECT sentence_id FROM user_sentence_note WHERE user_id=? UNION SELECT sentence_id FROM user_sentence_review_state WHERE user_id=? UNION SELECT i.sentence_id FROM sentence_translation_item i JOIN sentence_translation_session s ON s.id=i.session_id WHERE s.user_id=?";
-    private static final String WORDS="SELECT word_id FROM user_word_state WHERE user_id=? UNION SELECT i.word_id FROM learning_batch_item i JOIN learning_batch b ON b.id=i.batch_id WHERE b.user_id=? UNION SELECT i.word_id FROM word_book_item i JOIN word_book b ON b.id=i.book_id WHERE b.owner_id=? UNION SELECT w.word_id FROM sentence_item_word w JOIN sentence_translation_item i ON i.id=w.item_id JOIN sentence_translation_session s ON s.id=i.session_id WHERE s.user_id=? UNION SELECT word_id FROM sentence_word WHERE sentence_id IN ("+SENTENCES+")";
+    private static final String SENTENCES="SELECT sentence_id FROM user_sentence_favorite WHERE user_id=? UNION SELECT sentence_id FROM user_sentence_note WHERE user_id=? UNION SELECT sentence_id FROM user_sentence_learning WHERE user_id=? UNION SELECT sentence_id FROM sentence_translation_record WHERE user_id=?";
+    private static final String WORDS="SELECT word_id FROM user_word_state WHERE user_id=? UNION SELECT i.word_id FROM learning_batch_item i JOIN learning_batch b ON b.id=i.batch_id WHERE b.user_id=? UNION SELECT i.word_id FROM word_book_item i JOIN word_book b ON b.id=i.book_id WHERE b.owner_id=? UNION SELECT word_id FROM sentence_word WHERE sentence_id IN ("+SENTENCES+")";
     private static final Set<String> BOOLEANS=Set.of("affects_schedule","hint_used","extra_training","audio_auto_play","dictation_had_failure");
 
     private static Map<String,String> queries() {
@@ -35,11 +35,8 @@ public class PersonalLearningExportService {
         queries.put("word_feedback","SELECT id,user_id,word_id,batch_id,batch_item_id,event_type,corrects_log_id,learning_date,result,attempt_no,affects_schedule,schedule_before,schedule_after,answered_at,created_at,feedback_mode FROM word_review_log WHERE user_id=? ORDER BY id");
         queries.put("dictation_attempts","SELECT id,user_id,word_id,batch_id,batch_item_id,event_type,input_text,verdict,attempt_no,learning_date,answered_at,correct_streak_before,correct_streak_after,had_failure_after,item_status_after,completion_reason_after,affects_schedule FROM dictation_review_log WHERE user_id=? ORDER BY id");
         queries.put("training_attempts","SELECT id,user_id,word_id,batch_id,batch_item_id,mode,action,input_text,self_assessment,verdict,hint_used,extra_training,attempt_no,review_log_id,learning_date,answered_at FROM word_training_attempt WHERE user_id=? ORDER BY id");
-        queries.put("sentence_tasks","SELECT id,user_id,selection_source,status,created_at,completed_at FROM sentence_translation_session WHERE user_id=? ORDER BY id");
-        queries.put("sentence_task_items","SELECT i.id,i.session_id,i.sentence_id,i.sort_order,i.status,i.english_text,i.reference_translation,i.explanation,i.difficulty,i.source,i.source_reference FROM sentence_translation_item i JOIN sentence_translation_session s ON s.id=i.session_id WHERE s.user_id=? ORDER BY i.id");
-        queries.put("sentence_item_words","SELECT w.item_id,w.word_id,w.word FROM sentence_item_word w JOIN sentence_translation_item i ON i.id=w.item_id JOIN sentence_translation_session s ON s.id=i.session_id WHERE s.user_id=? ORDER BY w.item_id,w.word_id");
-        queries.put("sentence_attempts","SELECT id,user_id,session_id,item_id,sentence_id,action,translation,learning_date,submitted_at,self_assessment,review_date,reviewed_at FROM sentence_translation_attempt WHERE user_id=? ORDER BY id");
-        queries.put("sentence_review","SELECT id,user_id,sentence_id,last_attempt_id,review_level,last_assessment,reviewed_at,next_review_date FROM user_sentence_review_state WHERE user_id=? ORDER BY id");
+        queries.put("sentence_learning","SELECT user_id,sentence_id,added_at FROM user_sentence_learning WHERE user_id=? ORDER BY added_at,sentence_id");
+        queries.put("sentence_translation_records","SELECT id,user_id,sentence_id,translation,request_id,created_at FROM sentence_translation_record WHERE user_id=? ORDER BY id");
         queries.put("sentence_favorites","SELECT id,user_id,sentence_id,created_at FROM user_sentence_favorite WHERE user_id=? ORDER BY id");
         queries.put("sentence_notes","SELECT id,user_id,sentence_id,content,attempt_id,version,updated_at FROM user_sentence_note WHERE user_id=? ORDER BY id");
         queries.put("sentence_note_tags","SELECT t.note_id,t.error_tag FROM user_sentence_note_tag t JOIN user_sentence_note n ON n.id=t.note_id WHERE n.user_id=? ORDER BY t.note_id,t.error_tag");

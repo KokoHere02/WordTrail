@@ -6,7 +6,7 @@ import lombok.Setter;
 
 @Getter @Setter
 public class LearningRecordQuery {
-    public enum Type { ALL, DAILY, DICTATION, SENTENCE }
+    public enum Type { ALL, WORD, DAILY, DICTATION, SENTENCE }
     public enum Status { ALL, IN_PROGRESS, COMPLETED, INCOMPLETE, ABANDONED }
 
     @NotNull private Type type = Type.ALL;

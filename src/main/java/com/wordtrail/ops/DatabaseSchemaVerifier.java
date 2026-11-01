@@ -38,9 +38,9 @@ public class DatabaseSchemaVerifier implements SmartInitializingSingleton {
             }
         } catch(SQLException ex) {
             // Driver messages may contain connection information; expose only stable diagnostic codes.
-            throw new IllegalStateException("数据库结构检查失败，无法核对迁移至 013；SQLState="+ex.getSQLState()+"，错误码="+ex.getErrorCode());
+            throw new IllegalStateException("数据库结构检查失败，无法核对迁移至 016；SQLState="+ex.getSQLState()+"，错误码="+ex.getErrorCode());
         }
         if(!missing.isEmpty()) throw new IllegalStateException("数据库结构未就绪，缺少："+String.join("、",missing)
-            +"。请先备份并检查增量迁移是否已执行至 013；不要重跑已完成的迁移。应用停止启动。");
+            +"。请检查增量迁移是否已执行至 016；不要重跑已完成的迁移。应用停止启动。");
     }
 }

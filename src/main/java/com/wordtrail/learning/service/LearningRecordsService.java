@@ -43,16 +43,13 @@ public class LearningRecordsService {
           NULL, NULL, b.book_id, CASE WHEN b.study_mode='DICTATION' THEN 1 ELSE 0 END
         FROM learning_batch b WHERE b.user_id=:userId AND b.task_type='PRACTICE' AND b.practice_mode='DICTATION'
         UNION ALL
-        SELECT 'SENTENCE', s.id, DATE(s.created_at), s.created_at, s.status, s.status,
-          CASE WHEN s.status='IN_PROGRESS'
-                AND EXISTS (SELECT 1 FROM sentence_translation_item i WHERE i.session_id=s.id AND i.status<>'DONE')
-               THEN 1 ELSE 0 END,
-          NULL, s.selection_source, NULL, NULL
-        FROM sentence_translation_session s WHERE s.user_id=:userId
+        SELECT 'SENTENCE', r.id, DATE(r.created_at), r.created_at, 'COMPLETED', 'COMPLETED',
+          0, NULL, 'LEARNING_LIST', NULL, NULL
+        FROM sentence_translation_record r WHERE r.user_id=:userId
         """;
     private static final String FILTER = """
         FROM (""" + UNION + """
-        ) r WHERE (:type='ALL' OR r.record_type=:type)
+        ) r WHERE (:type='ALL' OR r.record_type=:type OR (:type='WORD' AND r.record_type IN ('DAILY','DICTATION')))
           AND (:status='ALL' OR r.display_status=:status)
         """;
 
@@ -70,16 +67,13 @@ public class LearningRecordsService {
         long total = Objects.requireNonNull(jdbc.queryForObject("SELECT COUNT(*) " + FILTER, parameters, Long.class));
         if (total == 0 || ((long)query.getPage()-1)*query.getSize() >= total)
             return new PageVO<>(query.getPage(), query.getSize(), total, List.of());
-        var rows = jdbc.query("SELECT r.* " + FILTER + " ORDER BY r.created_at DESC, r.record_type ASC, r.business_id DESC LIMIT :limit OFFSET :offset",
+        var rows = jdbc.query("SELECT r.* " + FILTER + " ORDER BY r.created_at DESC, r.record_type ASC, r.business_id DESC, r.source ASC LIMIT :limit OFFSET :offset",
             parameters, (rs, n) -> header(rs));
         var batches = rows.stream().filter(row -> !row.type().equals("SENTENCE")).map(Header::id).toList();
-        var sessions = rows.stream().filter(row -> row.type().equals("SENTENCE")).map(Header::id).toList();
-        var batchCounts = counts(batches, false);
-        var sessionCounts = counts(sessions, true);
+        var batchCounts = counts(batches);
         var records = rows.stream().map(row -> {
             boolean daily = row.type().equals("DAILY");
-            var count = (row.type().equals("SENTENCE") ? sessionCounts : batchCounts)
-                .getOrDefault(row.id(), new Counts(0, 0, 0, 0, 0));
+            var count = row.type().equals("SENTENCE") ? new Counts(1, 1, 0, 0, 0) : batchCounts.getOrDefault(row.id(), new Counts(0, 0, 0, 0, 0));
             return new LearningRecordVO(row.type(),row.id(),row.date(),row.createdAt(),row.rawStatus(),row.displayStatus(),
                 row.canContinue(),count.done(),count.total(),daily?count.skipped():null,daily?count.fresh():null,
                 daily?count.review():null,row.target(),daily && row.target()!=null ? count.done()>=row.target() : null,
@@ -96,14 +90,9 @@ public class LearningRecordsService {
             book==null?null:((Number)book).longValue(),single==null?null:((Number)single).intValue()!=0);
     }
 
-    private Map<Long,Counts> counts(List<Long> ids, boolean sentence) {
+    private Map<Long,Counts> counts(List<Long> ids) {
         if(ids.isEmpty()) return Map.of();
-        String sql = sentence ? """
-            SELECT session_id AS parent_id, COUNT(*) AS total_count,
-              SUM(CASE WHEN status='DONE' THEN 1 ELSE 0 END) AS done_count,
-              0 AS skipped_count, 0 AS new_count, 0 AS review_count
-            FROM sentence_translation_item WHERE session_id IN (:ids) GROUP BY session_id
-            """ : """
+        String sql = """
             SELECT batch_id AS parent_id, COUNT(*) AS total_count,
               SUM(CASE WHEN learning_status='DONE' THEN 1 ELSE 0 END) AS done_count,
               SUM(CASE WHEN learning_status='SKIPPED' THEN 1 ELSE 0 END) AS skipped_count,

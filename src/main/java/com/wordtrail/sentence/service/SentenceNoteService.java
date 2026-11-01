@@ -11,6 +11,7 @@ import com.wordtrail.sentence.vo.SentenceNoteVO.*;
 import java.util.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.*;
 import static com.mybatisflex.core.query.QueryMethods.column;
@@ -22,7 +23,7 @@ public class SentenceNoteService {
     private final SentenceNoteMapper notes;
     private final SentenceNoteTagMapper tags;
     private final SentenceQuestionMapper questions;
-    private final SentenceAttemptMapper attempts;
+    private final JdbcTemplate jdbc;
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public Note get(long sentenceId) {
         if(questions.selectCountByQuery(QueryWrapper.create().where(column("id").eq(sentenceId)))!=1) throw missing();
@@ -33,7 +34,7 @@ public class SentenceNoteService {
         context.lockUser(user.id());if(questions.selectOneById(sentenceId)==null) throw missing();var note=find(sentenceId);
         long version=note==null?0L:note.getVersion();
         if(version!=request.getVersion().longValue()) throw conflict("SENTENCE_NOTE_VERSION_CONFLICT","笔记已被修改，请刷新后再保存");
-        if(request.getAttemptId()!=null && attempts.selectCountByQuery(QueryWrapper.create().where(column("id").eq(request.getAttemptId())).and(column("user_id").eq(user.id())).and(column("sentence_id").eq(sentenceId)))!=1)
+        if(request.getAttemptId()!=null && jdbc.queryForObject("SELECT COUNT(*) FROM sentence_translation_record WHERE id=? AND user_id=? AND sentence_id=?",Long.class,request.getAttemptId(),user.id(),sentenceId)!=1)
             throw new BusinessException(HttpStatus.NOT_FOUND,"SENTENCE_ATTEMPT_NOT_FOUND","作答不存在或无权访问");
         if(note==null){note=new SentenceNote();note.setUserId(user.id());note.setSentenceId(sentenceId);note.setVersion(0L);}
         note.setContent(request.getContent().isBlank()?"":request.getContent());note.setAttemptId(request.getAttemptId());note.setVersion(note.getVersion()+1);note.setUpdatedAt(context.now());

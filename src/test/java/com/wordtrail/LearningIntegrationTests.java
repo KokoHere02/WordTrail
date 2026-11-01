@@ -3428,13 +3428,19 @@ class LearningIntegrationTests {
     }
 
     @Test void expansionPersonalExportIncludesOwnLearningAndNotesWithChecksumsButNoCredentials() throws Exception {
-        var jdbc=new org.springframework.jdbc.core.JdbcTemplate(dataSource); long sentence=0;
+        var jdbc=new org.springframework.jdbc.core.JdbcTemplate(dataSource); long sentence=0, newOnlySentence=0;
         try {
             jdbc.update("INSERT INTO sentence_question(english_text,reference_translation,explanation,difficulty,source,status) VALUES(?,?,?,?,?,?)",prefix+" private export sentence","参考译文","解析",1,"fixture","ACTIVE");
             sentence=jdbc.queryForObject("SELECT id FROM sentence_question WHERE english_text=?",Long.class,prefix+" private export sentence");
+            jdbc.update("INSERT INTO sentence_question(english_text,reference_translation,explanation,difficulty,source,status) VALUES(?,?,?,?,?,?)",prefix+" new-only export sentence","参考译文","解析",1,"fixture","ACTIVE");
+            newOnlySentence=jdbc.queryForObject("SELECT id FROM sentence_question WHERE english_text=?",Long.class,prefix+" new-only export sentence");
             jdbc.update("INSERT INTO user_sentence_note(user_id,sentence_id,content,version,updated_at) VALUES(?,?,?,?,?)",a,sentence,"本人私有笔记",1,contextTime());
             jdbc.update("INSERT INTO user_sentence_note(user_id,sentence_id,content,version,updated_at) VALUES(?,?,?,?,?)",b,sentence,"其他用户秘密笔记",1,contextTime());
             jdbc.update("INSERT INTO user_sentence_favorite(user_id,sentence_id,created_at) VALUES(?,?,?)",a,sentence,contextTime());
+            jdbc.update("INSERT INTO user_sentence_learning(user_id,sentence_id,added_at) VALUES(?,?,?)",a,sentence,contextTime());
+            jdbc.update("INSERT INTO sentence_translation_record(user_id,sentence_id,translation,request_id,created_at) VALUES(?,?,?,?,?)",a,sentence,"本人译文","export-own",contextTime());
+            jdbc.update("INSERT INTO sentence_translation_record(user_id,sentence_id,translation,request_id,created_at) VALUES(?,?,?,?,?)",b,sentence,"其他用户秘密译文","export-other",contextTime());
+            jdbc.update("INSERT INTO user_sentence_learning(user_id,sentence_id,added_at) VALUES(?,?,?)",a,newOnlySentence,contextTime());
             followPlan(wordIds.get(1)); long batch=followCreate().get("batchId").asLong(); followAnswer(batch,followNext(batch),spelling(1));
             String memory=stateSnapshot(),queue=batchSnapshot(batch);
             var response=download("/api/me/learning-data/export?userId="+b,tokenA); assertEquals(200,response.statusCode());
@@ -3451,13 +3457,18 @@ class LearningIntegrationTests {
                 assertEquals(json.readTree(entry.getValue()).size(),expected.get("rows").asInt());
                 String text=new String(entry.getValue(),StandardCharsets.UTF_8); assertFalse(text.contains("password_hash")); assertFalse(text.contains("token_hash")); assertFalse(text.contains("auth_version"));
                 assertFalse(text.contains("其他用户秘密笔记"));
+                assertFalse(text.contains("其他用户秘密译文"));
             }
             assertEquals(a,json.readTree(contents.get("profile.json")).get(0).get("id").asLong());
             assertEquals("本人私有笔记",json.readTree(contents.get("sentence_notes.json")).get(0).get("content").asText());
+            assertEquals(sentence,json.readTree(contents.get("sentence_learning.json")).get(0).get("sentence_id").asLong());
+            assertEquals("本人译文",json.readTree(contents.get("sentence_translation_records.json")).get(0).get("translation").asText());
+            assertTrue(new String(contents.get("sentences.json"),StandardCharsets.UTF_8).contains(prefix+" new-only export sentence"));
             assertEquals(2,json.readTree(contents.get("word_plan.json")).size());
             assertEquals(memory,stateSnapshot()); assertEquals(queue,batchSnapshot(batch)); assertEquals(401,download("/api/me/learning-data/export",null).statusCode());
         } finally {
-            if(sentence!=0) { jdbc.update("DELETE FROM user_sentence_note WHERE sentence_id=?",sentence); jdbc.update("DELETE FROM user_sentence_favorite WHERE sentence_id=?",sentence); jdbc.update("DELETE FROM sentence_question WHERE id=?",sentence); }
+            if(sentence!=0) { jdbc.update("DELETE FROM sentence_translation_record WHERE sentence_id=?",sentence); jdbc.update("DELETE FROM user_sentence_learning WHERE sentence_id=?",sentence); jdbc.update("DELETE FROM user_sentence_note WHERE sentence_id=?",sentence); jdbc.update("DELETE FROM user_sentence_favorite WHERE sentence_id=?",sentence); jdbc.update("DELETE FROM sentence_question WHERE id=?",sentence); }
+            if(newOnlySentence!=0) { jdbc.update("DELETE FROM user_sentence_learning WHERE sentence_id=?",newOnlySentence); jdbc.update("DELETE FROM sentence_question WHERE id=?",newOnlySentence); }
         }
     }
     private java.time.LocalDateTime contextTime() { return LocalDateTime.ofInstant(clock.instant(),ZoneId.of("Asia/Shanghai")); }
