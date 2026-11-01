@@ -130,13 +130,13 @@ if (( table_count == 0 )); then
       die '导入失败，数据库可能已部分初始化；请先人工检查，脚本不会覆盖非空库。'
     fi
     table_count=$("${mysql[@]}" --execute='SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()')
-    [[ $table_count == 25 ]] || die "初始化后的表数量为 $table_count，预期 25，请检查数据库。"
-    printf '数据库初始化完成：25 张表。\n'
+    [[ $table_count == 24 ]] || die "初始化后的表数量为 $table_count，预期 24，请检查数据库。"
+    printf '数据库初始化完成：24 张表。\n'
   else
     unset mysql_password mysql
     die '未确认初始化，启动已取消。'
   fi
-elif (( table_count < 25 )); then
+elif (( table_count < 24 )); then
   die "数据库已有 $table_count 个表或视图，可能是其他库或初始化不完整；请人工检查，脚本不会覆盖。"
 else
   printf '数据库包含 %s 个表或视图，跳过导入，保留现有数据。\n' "$table_count"
