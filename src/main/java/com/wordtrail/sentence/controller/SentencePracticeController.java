@@ -36,6 +36,7 @@ public class SentencePracticeController {
     public record Tags(@NotNull @Size(max=30) List<@NotNull @Positive Long> tagIds) {}
     public record Sentence(long id,String englishText,String referenceTranslation,String explanation,String source,String sourceReference,boolean learning,boolean favorite,boolean available) {}
     public record Tag(long id,String category,String name) {}
+    public record SentenceWithTags(long id,String englishText,String referenceTranslation,String explanation,String source,String sourceReference,boolean learning,boolean favorite,boolean available,List<Tag> tags) {}
     public record Record(long id,String translation,java.time.LocalDateTime createdAt) {}
     public record Result(long sentenceId,String referenceTranslation,String explanation) {}
     public record PracticeRecord(long id,long sentenceId,String englishText,String translation,String referenceTranslation,String explanation,java.time.LocalDateTime createdAt) {}
@@ -51,7 +52,7 @@ public class SentencePracticeController {
 
     @GetMapping("/tags") public ApiResponse<List<Tag>> tags(){return ApiResponse.ok(db.query("SELECT id,category,name FROM sentence_tag ORDER BY id",(r,n)->new Tag(r.getLong(1),r.getString(2),r.getString(3))));}
     @PutMapping("/sentences/{id}/favorite") public ApiResponse<Favorite> favorite(@PathVariable @Positive long id,@Valid @RequestBody SentenceFavoriteRequest request){return ApiResponse.ok(favorites.set(id,request.favorite()));}
-    @GetMapping("/sentences") public ApiResponse<List<Sentence>> list(@RequestParam(defaultValue="bank") String scope,@RequestParam(required=false) Long tagId,@RequestParam(required=false) Long wordId,@RequestParam(defaultValue="0") @Min(0) int offset,@RequestParam(defaultValue="50") @Min(1) @Max(100) int limit){
+    @GetMapping("/sentences") public ApiResponse<List<SentenceWithTags>> list(@RequestParam(defaultValue="bank") String scope,@RequestParam(required=false) Long tagId,@RequestParam(required=false) Long wordId,@RequestParam(defaultValue="0") @Min(0) int offset,@RequestParam(defaultValue="50") @Min(1) @Max(100) int limit){
         if(offset<0 || limit<1 || limit>100 || (tagId!=null && tagId<=0) || (wordId!=null && wordId<=0)) throw error(HttpStatus.BAD_REQUEST,"INVALID_PARAMETER","筛选或分页参数无效");
         if(!Set.of("bank","learning","favorites").contains(scope)) throw error(HttpStatus.BAD_REQUEST,"INVALID_SCOPE","无效的范围");
         String filter=switch(scope){case "learning" -> " AND EXISTS (SELECT 1 FROM user_sentence_learning l WHERE l.user_id=? AND l.sentence_id=q.id)";case "favorites" -> " AND EXISTS (SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id)";default -> "";};
@@ -60,7 +61,15 @@ public class SentencePracticeController {
         if(wordId!=null){filter+=" AND EXISTS (SELECT 1 FROM sentence_word w WHERE w.sentence_id=q.id AND w.word_id=?)";args.add(wordId);}
         args.add(limit);args.add(offset);
         String sql="SELECT q.id,q.english_text,q.reference_translation,q.explanation,q.source,q.source_reference, EXISTS(SELECT 1 FROM user_sentence_learning l WHERE l.user_id=? AND l.sentence_id=q.id), EXISTS(SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id), q.status FROM sentence_question q WHERE 1=1"+(scope.equals("bank")?" AND q.status='ACTIVE'":"")+filter+" ORDER BY q.id DESC LIMIT ? OFFSET ?";
-        return ApiResponse.ok(db.query(sql,(r,n)->new Sentence(r.getLong(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5),r.getString(6),r.getBoolean(7),r.getBoolean(8),"ACTIVE".equals(r.getString(9))),args.toArray()));
+        var sentences=db.query(sql,(r,n)->new Sentence(r.getLong(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5),r.getString(6),r.getBoolean(7),r.getBoolean(8),"ACTIVE".equals(r.getString(9))),args.toArray());
+        if(sentences.isEmpty()) return ApiResponse.ok(List.of());
+        var ids=sentences.stream().map(Sentence::id).toList();
+        var tagsBySentence=new HashMap<Long,List<Tag>>();
+        String placeholders=String.join(",",Collections.nCopies(ids.size(),"?"));
+        db.query("SELECT r.sentence_id,t.id,t.category,t.name FROM sentence_tag_relation r JOIN sentence_tag t ON t.id=r.tag_id WHERE r.sentence_id IN ("+placeholders+") ORDER BY t.id", r -> {
+            tagsBySentence.computeIfAbsent(r.getLong(1), ignored -> new ArrayList<>()).add(new Tag(r.getLong(2),r.getString(3),r.getString(4)));
+        },ids.toArray());
+        return ApiResponse.ok(sentences.stream().map(s -> new SentenceWithTags(s.id(),s.englishText(),s.referenceTranslation(),s.explanation(),s.source(),s.sourceReference(),s.learning(),s.favorite(),s.available(),tagsBySentence.getOrDefault(s.id(),List.of()))).toList());
     }
     @GetMapping("/learning/random") public ApiResponse<List<Sentence>> random(@RequestParam(defaultValue="10") int count,@RequestParam(required=false) Long tagId,@RequestParam(required=false) Long wordId){
         if(count<1 || count>50)throw error(HttpStatus.BAD_REQUEST,"INVALID_COUNT","数量应为 1 至 50");

@@ -357,7 +357,10 @@ class SentenceTranslationIntegrationTests {
         jdbc.update("INSERT INTO sentence_tag(category,name) VALUES (?,?)","句式",prefix+"tag");
         long tag=jdbc.queryForObject("SELECT id FROM sentence_tag WHERE name=?",Long.class,prefix+"tag");
         ok("PUT",base+"/sentences/"+sentence+"/tags",Map.of("tagIds",List.of(tag)),tokenA,200);
-        assertEquals(1,ok("GET",base+"/sentences?scope=bank&tagId="+tag,null,tokenA,200).size());
+        var taggedSentences=ok("GET",base+"/sentences?scope=bank&tagId="+tag,null,tokenA,200);
+        assertEquals(1,taggedSentences.size());
+        assertEquals(1,taggedSentences.get(0).get("tags").size());
+        assertEquals(prefix+"tag",taggedSentences.get(0).get("tags").get(0).get("name").asString());
         ok("PUT",base+"/learning/"+sentence,null,tokenA,200);
         assertEquals(1,ok("GET",base+"/learning/random?count=10&tagId="+tag,null,tokenA,200).size());
         ok("PUT",BASE+"/questions/"+sentence+"/favorite",Map.of("favorite",true),tokenA,200);
