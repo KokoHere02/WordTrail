@@ -2,6 +2,7 @@ package com.wordtrail.learning.controller;
 
 import com.wordtrail.learning.dto.PronunciationRequest.Accent;
 import com.wordtrail.learning.service.TrainingAudioService;
+import com.wordtrail.learning.service.DictationService;
 import jakarta.validation.constraints.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.*;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.*;
 @RestController @RequiredArgsConstructor
 public class PronunciationController {
     private final TrainingAudioService audio;
+    private final DictationService dictation;
     private ResponseEntity<byte[]> response(byte[] bytes) {
         return ResponseEntity.ok().contentType(MediaType.parseMediaType("audio/mpeg"))
             .header(HttpHeaders.CACHE_CONTROL,"no-store").header(HttpHeaders.CONTENT_DISPOSITION,"inline; filename=pronunciation.mp3").body(bytes);
@@ -22,5 +24,10 @@ public class PronunciationController {
             @RequestParam @Pattern(regexp="[a-f0-9-]{36}") String presentationId,@RequestParam @PositiveOrZero long modeVersion,
             @RequestParam(required=false) Accent accent) {
         return response(audio.audio(audio.trainingTarget(batchId,itemId,presentationId,modeVersion),accent));
+    }
+    @GetMapping("/api/dictation/batches/{batchId}/items/{itemId}/audio")
+    public ResponseEntity<byte[]> dictation(@PathVariable @Positive long batchId,@PathVariable @Positive long itemId,
+            @RequestParam @Pattern(regexp="[a-f0-9-]{36}") String presentationId,@RequestParam(required=false) Accent accent) {
+        return response(audio.audio(dictation.audioTarget(batchId,itemId,presentationId),accent));
     }
 }

@@ -39,7 +39,8 @@ public class DictationService {
         if(selected!=null) {
             if(candidates.size()!=selected.size()) throw conflict("DICTATION_WORD_UNAVAILABLE","所选词须全部满足来源、词本和释义条件，请刷新选词");
             var indexed=candidates.stream().collect(Collectors.toMap(DictationMapper.Candidate::wordId,Function.identity()));
-            candidates=selected.stream().map(indexed::get).toList();
+            candidates=new ArrayList<>(selected.stream().map(indexed::get).toList());
+            Collections.shuffle(candidates);
         }
         if(candidates.isEmpty()) throw conflict("NO_DICTATION_WORDS","没有可用于默写的单词；计划词须 ACTIVE、已开始且有释义");
         var now=context.now(); var batch=new LearningBatch();
@@ -78,7 +79,17 @@ public class DictationService {
         }
         String prompt=DictationPolicy.prompt(item.getDictationTranslation(),item.getDictationTarget());
         return new DictationQuestionVO(item.getId(),prompt,TranslationParser.parse(prompt),item.getDictationPresentationId(),
-            1,0,1,DictationPolicy.MAX_ATTEMPTS);
+            1,0,1,DictationPolicy.MAX_ATTEMPTS,"/api/dictation/batches/"+batchId+"/items/"+item.getId()+"/audio?presentationId="+item.getDictationPresentationId());
+    }
+
+    @Transactional(readOnly=true)
+    public String audioTarget(long batchId,long itemId,String presentationId) {
+        var batch=owned(batchId,false); requireTest(batch);
+        var item=next(context.entries(batchId));
+        if(!"IN_PROGRESS".equals(batch.getStatus()) || item==null || item.getId()!=itemId
+            || !Objects.equals(item.getDictationPresentationId(),presentationId))
+            throw conflict("STALE_DICTATION_ANSWER","题目已变化，请重新获取题目");
+        return item.getDictationTarget();
     }
 
     @Transactional

@@ -3541,14 +3541,26 @@ class LearningIntegrationTests {
         assertEquals(1,get("/api/dictation/mistakes",tokenA).get("total").asInt());
     }
 
+    @Test void dictationAudioIsBoundToCurrentOwnedPresentation() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong(); var question=dictationNext(batch);
+        String url=question.get("audioUrl").asText();
+        assertFalse(question.toString().contains(spelling(0)));
+        assertEquals(200,download(url,tokenA).statusCode()); assertEquals(spelling(0),audioFixture.lastWord);
+        assertEquals(404,download(url,tokenB).statusCode());
+        assertEquals(409,download(url.replace(question.get("presentationId").asText(),"00000000-0000-0000-0000-000000000000"),tokenA).statusCode());
+        dictate(batch,question,null,requestId());
+        assertEquals(409,download(url,tokenA).statusCode());
+    }
+
     @Test void dictationUsesFixedOrderAndNeverRequeuesWrongOrRevealedQuestions() throws Exception {
         for(int i=1;i<5;i++) learn(a,wordIds.get(i),1);
         long batch=createDictation(Map.of("wordIds",wordIds.subList(0,5))).get("batchId").asLong(); var entries=batchDetails(batch);
+        assertEquals(new HashSet<>(wordIds.subList(0,5)),entries.stream().map(LearningBatchItem::getWordId).collect(java.util.stream.Collectors.toSet()));
         for(int i=0;i<5;i++) {
             var question=dictationNext(batch); assertEquals(entries.get(i).getId().longValue(),question.get("itemId").asLong());
             assertEquals(1,question.get("attemptLimit").asInt()); assertEquals(1,question.get("nextAttemptNo").asInt());
             assertEquals(question,dictationNext(batch));
-            dictate(batch,question,i==0?null:i==1?"wrong":spelling(i),requestId());
+            dictate(batch,question,i==0?null:i==1?"wrong":entries.get(i).getDictationTarget(),requestId());
         }
         var task=get(dictationPath(batch),tokenA); assertEquals("COMPLETED",task.get("status").asText());
         assertEquals(5,task.get("attemptCount").asInt()); assertEquals(3,task.get("passedCount").asInt());
@@ -3682,8 +3694,8 @@ class LearningIntegrationTests {
     @Test void dictationDefersAnswersScoresAndHistoryUntilTheWholeTestEnds() throws Exception {
         learn(a,wordIds.get(1),1); learn(a,wordIds.get(2),1);
         long batch=createDictation(Map.of("wordIds",wordIds.subList(0,3))).get("batchId").asLong();
-        var question=dictationNext(batch); String key=requestId(); var body=dictationBody(question,spelling(0),key);
-        var first=dictate(batch,question,spelling(0),key);
+        var question=dictationNext(batch); String expected=batchDetails(batch).get(0).getDictationTarget(); long firstWord=batchDetails(batch).get(0).getWordId(); String key=requestId(); var body=dictationBody(question,expected,key);
+        var first=dictate(batch,question,expected,key);
         assertEquals("DONE",first.get("itemStatus").asText()); assertEquals(1,first.at("/progress/completedCount").asInt());
         for(String field:List.of("expectedWord","translation","verdict","correctStreak","completionReason")) assertFalse(first.has(field),field);
         assertTrue(first.get("translationGroups").isEmpty());
@@ -3702,9 +3714,9 @@ class LearningIntegrationTests {
         var results=get(dictationPath(batch)+"/result/words",tokenA).get("records");
         assertEquals(List.of("CORRECT","INCORRECT","REVEALED"),java.util.stream.StreamSupport.stream(results.spliterator(),false).map(i->i.get("lastVerdict").asText()).toList());
         assertEquals(2,get("/api/dictation/mistakes",tokenA).get("total").asInt());
-        assertEquals(1,get("/api/dictation/words/"+wordIds.get(0)+"/history",tokenA).get("total").asInt());
+        assertEquals(1,get("/api/dictation/words/"+firstWord+"/history",tokenA).get("total").asInt());
         var replay=data(call("PUT",dictationPath(batch)+"/items/"+question.get("itemId").asLong()+"/answer",body,tokenA));
-        assertEquals(spelling(0),replay.get("expectedWord").asText()); assertEquals("CORRECT",replay.get("verdict").asText());
+        assertEquals(expected,replay.get("expectedWord").asText()); assertEquals("CORRECT",replay.get("verdict").asText());
         assertEquals(3,dictationLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))));
     }
 
@@ -3744,13 +3756,14 @@ class LearningIntegrationTests {
     @Test void revealConsumesTheQuestionButOnlyDisclosesTheRequestedAnswer() throws Exception {
         learn(a,wordIds.get(1),1);
         long batch=createDictation(Map.of("wordIds",wordIds.subList(0,2))).get("batchId").asLong();
+        var entries=batchDetails(batch);
         var reveal=dictate(batch,null); assertEquals("DONE",reveal.get("itemStatus").asText());
-        assertEquals(spelling(0),reveal.get("expectedWord").asText()); assertEquals("REVEALED",reveal.get("verdict").asText());
+        assertEquals(entries.get(0).getDictationTarget(),reveal.get("expectedWord").asText()); assertEquals("REVEALED",reveal.get("verdict").asText());
         assertTrue(reveal.at("/progress/passedCount").isNull()); assertTrue(reveal.at("/progress/accuracy").isNull());
-        assertFalse(reveal.toString().contains(spelling(1)));
+        assertFalse(reveal.toString().contains(entries.get(1).getDictationTarget()));
         assertEquals(409,call("GET",dictationPath(batch)+"/result/words",null,tokenA).statusCode());
         assertEquals(0,get("/api/dictation/words/"+wordIds.get(0)+"/history",tokenA).get("total").asInt());
-        dictate(batch,spelling(1)); assertEquals(0.5,get(dictationPath(batch),tokenA).get("accuracy").asDouble());
+        dictate(batch,entries.get(1).getDictationTarget()); assertEquals(0.5,get(dictationPath(batch),tokenA).get("accuracy").asDouble());
     }
 
     private long legacyDictation(boolean completed) throws Exception {
