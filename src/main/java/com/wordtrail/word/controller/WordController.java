@@ -9,6 +9,8 @@ import com.wordtrail.word.vo.WordDetailVO;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import lombok.RequiredArgsConstructor;
+import org.springframework.jdbc.core.JdbcTemplate;
+import java.util.List;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -16,6 +18,15 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class WordController {
     private final WordService words;
+    private final JdbcTemplate db;
+
+    public record WordForm(String form, String formType) {}
+
+    @GetMapping("/{wordId}/forms")
+    public ApiResponse<List<WordForm>> forms(@PathVariable @Positive long wordId) {
+        return ApiResponse.ok(db.query("SELECT form,form_type FROM word_form WHERE word_id=? ORDER BY form_type,form,id",
+            (row, index) -> new WordForm(row.getString(1), row.getString(2)), wordId));
+    }
 
     @GetMapping("/{wordId}")
     public ApiResponse<WordDetailVO> detail(@PathVariable @Positive long wordId) {
