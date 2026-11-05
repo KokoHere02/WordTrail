@@ -56,6 +56,21 @@ CREATE TABLE `word` (
   KEY `idx_word` (`word`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='单词基础表';
 
+CREATE TABLE `word_form` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `word_id` bigint unsigned NOT NULL,
+  `form` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `form_type` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `source` varchar(32) NOT NULL DEFAULT 'ECDICT',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_word_form` (`word_id`,`form`,`form_type`),
+  KEY `idx_word_form_form` (`form`),
+  CONSTRAINT `fk_word_form_word` FOREIGN KEY (`word_id`) REFERENCES `word` (`id`),
+  CONSTRAINT `chk_word_form_type` CHECK (`form_type` IN ('PAST','PAST_PARTICIPLE','PRESENT_PARTICIPLE','THIRD_PERSON_SINGULAR','PLURAL','COMPARATIVE','SUPERLATIVE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE `word_book` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '词书ID',
   `name` varchar(128) NOT NULL COMMENT '词书名称',
