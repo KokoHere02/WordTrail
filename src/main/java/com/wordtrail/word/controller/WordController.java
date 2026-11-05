@@ -8,9 +8,12 @@ import com.wordtrail.word.vo.DictionaryWordVO;
 import com.wordtrail.word.vo.WordDetailVO;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import java.util.List;
+import java.util.Locale;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -21,6 +24,19 @@ public class WordController {
     private final JdbcTemplate db;
 
     public record WordForm(String form, String formType) {}
+    public record LookupWord(long id, String word, String phonetic, String translation) {}
+
+    @GetMapping("/lookup")
+    public ApiResponse<List<LookupWord>> lookup(@RequestParam @NotBlank @Size(max = 255) String term) {
+        String spelling = term.strip().replace('’', '\'');
+        String normalized = spelling.toLowerCase(Locale.ROOT);
+        return ApiResponse.ok(db.query("""
+            SELECT w.id,w.word,w.phonetic,w.translation FROM word w
+            WHERE w.word IN (?,?) OR w.id IN (SELECT f.word_id FROM word_form f WHERE f.form IN (?,?))
+            ORDER BY CASE WHEN w.word IN (?,?) THEN 0 ELSE 1 END,w.id LIMIT 20
+            """, (row, index) -> new LookupWord(row.getLong(1), row.getString(2), row.getString(3), row.getString(4)),
+            spelling, normalized, spelling, normalized, spelling, normalized));
+    }
 
     @GetMapping("/{wordId}/forms")
     public ApiResponse<List<WordForm>> forms(@PathVariable @Positive long wordId) {
