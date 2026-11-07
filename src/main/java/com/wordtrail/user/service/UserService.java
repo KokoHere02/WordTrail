@@ -76,6 +76,66 @@ public class UserService {
         return issuePair(account,newSession(account,request.getDeviceName()));
     }
 
+    @Transactional
+    public TokenVO registerPhone(String phone,String password,String deviceName) {
+        var account=new UserAccount();
+        account.setUsername("u_"+UUID.randomUUID().toString().replace("-",""));
+        account.setPhone(phone); account.setPasswordHash(passwords.hash(password)); account.setAuthVersion(0L);
+        try { users.insertSelective(account); }
+        catch(DuplicateKeyException ex) { throw new BusinessException(HttpStatus.CONFLICT,"PHONE_EXISTS","手机号已注册"); }
+        return issuePair(account,newSession(account,deviceName));
+    }
+    @Transactional
+    public TokenVO passwordPhone(String phone,String password,String deviceName) {
+        var account=users.selectOneByQuery(QueryWrapper.create().where(column("phone").eq(phone)).forUpdate());
+        if(!passwords.matches(password,account==null?null:account.getPasswordHash()))
+            throw new BusinessException(HttpStatus.UNAUTHORIZED,"BAD_CREDENTIALS","账号或密码错误");
+        return issuePair(account,newSession(account,deviceName));
+    }
+    @Transactional
+    public TokenVO loginPhone(String phone,String deviceName) {
+        var account=users.selectOneByQuery(QueryWrapper.create().where(column("phone").eq(phone)).forUpdate());
+        if(account==null) {
+            // An SMS-only account has no known password. The user can set one later
+            // after verifying the bound phone in account security.
+            byte[] passwordBytes=new byte[32]; random.nextBytes(passwordBytes);
+            account=new UserAccount();
+            account.setUsername("u_"+UUID.randomUUID().toString().replace("-",""));
+            account.setPhone(phone);
+            account.setPasswordHash(passwords.hash(Base64.getUrlEncoder().withoutPadding().encodeToString(passwordBytes)));
+            account.setAuthVersion(0L);
+            try { requireWrite(users.insertSelective(account)); }
+            catch(DuplicateKeyException ex) {
+                account=users.selectOneByQuery(QueryWrapper.create().where(column("phone").eq(phone)).forUpdate());
+                if(account==null) throw ex;
+            }
+        }
+        return issuePair(account,newSession(account,deviceName));
+    }
+    public String currentPhone() {
+        var account=users.selectOneById(current.id());
+        if(account==null || account.getPhone()==null) throw new BusinessException(HttpStatus.CONFLICT,"PHONE_NOT_BOUND","当前账户未绑定手机号");
+        return account.getPhone();
+    }
+    @Transactional
+    public void setPhonePassword(String phone,String password) {
+        var account=lock(current.id()); requireIdentity(account);
+        if(!phone.equals(account.getPhone())) throw JwtTokenService.unauthorized();
+        var patch=new UserAccount(); patch.setId(account.getId()); patch.setPasswordHash(passwords.hash(password));
+        patch.setAuthVersion(Math.addExact(account.getAuthVersion(),1)); requireWrite(users.update(patch)); revokeAll(account.getId(),null);
+    }
+    @Transactional
+    public void changePhone(String oldPhone,String newPhone) {
+        var account=lock(current.id()); requireIdentity(account);
+        if(!oldPhone.equals(account.getPhone())) throw JwtTokenService.unauthorized();
+        if(oldPhone.equals(newPhone)) throw new BusinessException(HttpStatus.CONFLICT,"PHONE_UNCHANGED","新手机号不能与原手机号相同");
+        var patch=new UserAccount(); patch.setId(account.getId()); patch.setPhone(newPhone);
+        patch.setAuthVersion(Math.addExact(account.getAuthVersion(),1));
+        try { requireWrite(users.update(patch)); }
+        catch(DuplicateKeyException ex) { throw new BusinessException(HttpStatus.CONFLICT,"PHONE_EXISTS","手机号已注册"); }
+        revokeAll(account.getId(),null);
+    }
+
     public UserVO me(long userId) {
         var account = users.selectOneById(userId);
         if (account == null) { throw JwtTokenService.unauthorized(); }

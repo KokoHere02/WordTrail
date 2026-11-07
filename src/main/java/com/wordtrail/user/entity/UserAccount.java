@@ -17,6 +17,8 @@ public class UserAccount {
     private Long id;
     @ToString.Include
     private String username;
+    private String phone;
+    private String email;
     @JsonIgnore
     @Column("password_hash")
     private String passwordHash;

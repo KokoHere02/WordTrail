@@ -20,16 +20,6 @@ public class AuthController {
     private final UserService users;
     private final CurrentUser currentUser;
 
-    @PostMapping("/register")
-    public ResponseEntity<ApiResponse<UserVO>> register(@Valid @RequestBody RegisterRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(users.register(request)));
-    }
-
-    @PostMapping("/login")
-    public ApiResponse<TokenVO> login(@Valid @RequestBody LoginRequest request) {
-        return ApiResponse.ok(users.login(request));
-    }
-
     @PostMapping("/refresh")
     public ApiResponse<TokenVO> refresh(@Valid @RequestBody RefreshTokenRequest request) {
         return ApiResponse.ok(users.refresh(request.getRefreshToken()));
@@ -46,6 +36,5 @@ public class AuthController {
     @GetMapping("/sessions") public ApiResponse<PageVO<AuthSessionVO>> sessions(@Valid @ModelAttribute WordHistoryQuery query){return ApiResponse.ok(users.sessions(query));}
     @PostMapping("/sessions/{sessionId}/revoke")
     public ApiResponse<Void> revoke(@PathVariable @Pattern(regexp="[a-f0-9]{32}") String sessionId){users.revokeSession(sessionId);return ApiResponse.ok(null);}
-    @PutMapping("/password") public ApiResponse<Void> password(@Valid @RequestBody ChangePasswordRequest request){users.changePassword(request);return ApiResponse.ok(null);}
     @PostMapping("/logout-others") public ApiResponse<TokenVO> logoutOthers(@Valid @RequestBody LogoutOthersRequest request){return ApiResponse.ok(users.logoutOthers(request));}
 }

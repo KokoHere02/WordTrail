@@ -30,14 +30,24 @@ CREATE TABLE `sentence_question` (
 CREATE TABLE `user_account` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '用户ID',
   `username` varchar(64) NOT NULL COMMENT '登录账号',
+  `phone` varchar(11) DEFAULT NULL,
+  `email` varchar(254) DEFAULT NULL,
   `password_hash` varchar(255) NOT NULL COMMENT '密码哈希，如BCrypt',
   `nickname` varchar(64) DEFAULT NULL COMMENT '昵称',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `auth_version` bigint unsigned NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_username` (`username`)
+  UNIQUE KEY `uk_username` (`username`),
+  UNIQUE KEY `uk_user_phone` (`phone`),
+  UNIQUE KEY `uk_user_email` (`email`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='用户表';
+
+CREATE TABLE sms_send_guard (id INT PRIMARY KEY);
+INSERT INTO sms_send_guard VALUES (1);
+CREATE TABLE sms_send_log (phone VARCHAR(11) NOT NULL, client_ip VARCHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, KEY idx_sms_phone(phone,created_at), KEY idx_sms_ip(client_ip,created_at), KEY idx_sms_time(created_at));
+CREATE TABLE auth_password_attempt (phone VARCHAR(11) NOT NULL, client_ip VARCHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, KEY idx_auth_attempt_phone(phone,created_at), KEY idx_auth_attempt_ip(client_ip,created_at));
+CREATE TABLE sms_challenge (phone VARCHAR(11) PRIMARY KEY, purpose VARCHAR(24) NOT NULL, owner_id BIGINT DEFAULT NULL, session_id VARCHAR(32) DEFAULT NULL, expires_at DATETIME(6) NOT NULL, attempts INT NOT NULL, consumed BOOLEAN NOT NULL);
 
 CREATE TABLE `word` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '单词ID',

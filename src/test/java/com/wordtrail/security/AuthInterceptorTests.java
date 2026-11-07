@@ -46,7 +46,7 @@ class AuthInterceptorTests {
             interceptor.preHandle(new MockHttpServletRequest("GET", "/api/auth/me"), response, this));
         assertThrows(BusinessException.class, current::id);
         current.bind(42);
-        assertTrue(interceptor.preHandle(new MockHttpServletRequest("POST", "/api/auth/login"), response, this));
+        assertTrue(interceptor.preHandle(new MockHttpServletRequest("POST", "/api/auth/phone/password-login"), response, this));
         assertThrows(BusinessException.class, current::id);
     }
 
