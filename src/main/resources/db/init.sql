@@ -1,9 +1,9 @@
--- WordTrail complete empty-database schema, consolidated through migration 013.
+-- WordTrail complete empty-database schema, including phone authentication and word forms.
 -- MySQL 8.0.16+; generated and verified against MySQL 8.0 on 2026-10-29.
 -- Select an EMPTY database before running; import manually before starting the app.
 -- Do not run this initializer on an existing installation or run old migrations afterwards.
--- All 25 tables are created directly at their latest structure. No business data is copied.
--- Application test account: username=test, password=Test123456 (BCrypt cost 12).
+-- All tables are created directly at their latest structure. No business data is copied.
+-- Legacy seed account: username=test; it has no phone and cannot use phone sign-in.
 -- No words, books, sentences, settings, tokens, sessions or learning history are seeded.
 
 SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;
@@ -144,21 +144,6 @@ CREATE TABLE `sentence_import_batch` (
   UNIQUE KEY `uk_sentence_import_request` (`user_id`,`request_id`),
   CONSTRAINT `fk_sentence_import_user` FOREIGN KEY (`user_id`) REFERENCES `user_account` (`id`),
   CONSTRAINT `chk_sentence_import_count` CHECK ((`row_count` between 1 and 100))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE `sentence_translation_session` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `user_id` bigint unsigned NOT NULL,
-  `selection_source` varchar(20) NOT NULL,
-  `status` varchar(20) NOT NULL DEFAULT 'IN_PROGRESS',
-  `created_at` datetime(3) NOT NULL,
-  `completed_at` datetime(3) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_sentence_session_user` (`id`,`user_id`),
-  KEY `idx_sentence_session_list` (`user_id`,`status`,`created_at`,`id`),
-  CONSTRAINT `fk_sentence_session_user` FOREIGN KEY (`user_id`) REFERENCES `user_account` (`id`),
-  CONSTRAINT `chk_sentence_session_source` CHECK ((`selection_source` in (_utf8mb4'BANK',_utf8mb4'REVIEW',_utf8mb4'FAVORITES',_utf8mb4'DUE'))),
-  CONSTRAINT `chk_sentence_session_status` CHECK ((((`status` = _utf8mb4'IN_PROGRESS') and (`completed_at` is null)) or ((`status` = _utf8mb4'COMPLETED') and (`completed_at` is not null))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `sentence_word` (
@@ -310,30 +295,6 @@ CREATE TABLE `sentence_import_item` (
   CONSTRAINT `fk_sentence_import_item_question` FOREIGN KEY (`sentence_id`) REFERENCES `sentence_question` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE `sentence_translation_item` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `session_id` bigint unsigned NOT NULL,
-  `sentence_id` bigint unsigned NOT NULL,
-  `sort_order` int unsigned NOT NULL,
-  `status` varchar(20) NOT NULL DEFAULT 'PENDING',
-  `english_text` varchar(2000) NOT NULL,
-  `reference_translation` varchar(2000) NOT NULL,
-  `explanation` varchar(4000) NOT NULL,
-  `difficulty` tinyint unsigned NOT NULL,
-  `source` varchar(255) NOT NULL,
-  `source_reference` varchar(512) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_sentence_item` (`session_id`,`sentence_id`),
-  UNIQUE KEY `uk_sentence_item_order` (`session_id`,`sort_order`),
-  UNIQUE KEY `uk_sentence_item_identity` (`id`,`session_id`,`sentence_id`),
-  KEY `fk_sentence_item_question` (`sentence_id`),
-  CONSTRAINT `fk_sentence_item_question` FOREIGN KEY (`sentence_id`) REFERENCES `sentence_question` (`id`),
-  CONSTRAINT `fk_sentence_item_session` FOREIGN KEY (`session_id`) REFERENCES `sentence_translation_session` (`id`),
-  CONSTRAINT `chk_sentence_item_content` CHECK (((char_length(trim(`english_text`)) > 0) and (char_length(trim(`reference_translation`)) > 0) and (char_length(trim(`explanation`)) > 0) and (char_length(trim(`source`)) > 0) and (`difficulty` between 1 and 3))),
-  CONSTRAINT `chk_sentence_item_order` CHECK ((`sort_order` between 1 and 50)),
-  CONSTRAINT `chk_sentence_item_status` CHECK ((`status` in (_utf8mb4'PENDING',_utf8mb4'AWAITING_REVIEW',_utf8mb4'DONE')))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE `dictation_review_log` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `user_id` bigint unsigned NOT NULL,
@@ -368,46 +329,6 @@ CREATE TABLE `dictation_review_log` (
   CONSTRAINT `fk_dictation_word` FOREIGN KEY (`word_id`) REFERENCES `word` (`id`),
   CONSTRAINT `chk_dictation_event` CHECK ((((`event_type` = _utf8mb4'ANSWER') and (`input_text` is not null) and (`verdict` in (_utf8mb4'CORRECT',_utf8mb4'INCORRECT'))) or ((`event_type` = _utf8mb4'REVEAL') and (`input_text` is null) and (`verdict` = _utf8mb4'REVEALED')))),
   CONSTRAINT `chk_dictation_state` CHECK (((`attempt_no` between 1 and 6) and (`correct_streak_before` between 0 and 2) and (`correct_streak_after` between 0 and 2) and (`had_failure_after` in (0,1)) and (`item_status_after` in (_utf8mb4'RELEARNING',_utf8mb4'DONE')) and (`affects_schedule` = 0) and (((`item_status_after` = _utf8mb4'RELEARNING') and (`completion_reason_after` is null)) or ((`item_status_after` = _utf8mb4'DONE') and (`completion_reason_after` is not null) and (`completion_reason_after` in (_utf8mb4'RECALLED',_utf8mb4'LIMIT_REACHED'))))))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE `sentence_item_word` (
-  `item_id` bigint unsigned NOT NULL,
-  `word_id` bigint unsigned NOT NULL,
-  `word` varchar(255) NOT NULL,
-  PRIMARY KEY (`item_id`,`word_id`),
-  CONSTRAINT `fk_sentence_item_word_item` FOREIGN KEY (`item_id`) REFERENCES `sentence_translation_item` (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE `sentence_translation_attempt` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `user_id` bigint unsigned NOT NULL,
-  `session_id` bigint unsigned NOT NULL,
-  `item_id` bigint unsigned NOT NULL,
-  `sentence_id` bigint unsigned NOT NULL,
-  `submit_request_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  `action` varchar(20) NOT NULL,
-  `translation` varchar(2000) DEFAULT NULL,
-  `learning_date` date NOT NULL,
-  `submitted_at` datetime(3) NOT NULL,
-  `self_assessment` varchar(20) DEFAULT NULL,
-  `review_request_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
-  `review_date` date DEFAULT NULL,
-  `reviewed_at` datetime(3) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_sentence_attempt_item` (`item_id`),
-  UNIQUE KEY `uk_sentence_submit_request` (`user_id`,`submit_request_id`),
-  UNIQUE KEY `uk_sentence_attempt_note_identity` (`id`,`user_id`,`sentence_id`),
-  UNIQUE KEY `uk_sentence_review_request` (`user_id`,`review_request_id`),
-  KEY `idx_sentence_attempt_history` (`user_id`,`sentence_id`,`submitted_at`,`id`),
-  KEY `idx_sentence_attempt_latest` (`user_id`,`sentence_id`,`id`),
-  KEY `idx_sentence_attempt_date` (`user_id`,`learning_date`),
-  KEY `idx_sentence_attempt_session` (`session_id`,`id`),
-  KEY `fk_sentence_attempt_user_session` (`session_id`,`user_id`),
-  KEY `fk_sentence_attempt_item` (`item_id`,`session_id`,`sentence_id`),
-  CONSTRAINT `fk_sentence_attempt_item` FOREIGN KEY (`item_id`, `session_id`, `sentence_id`) REFERENCES `sentence_translation_item` (`id`, `session_id`, `sentence_id`),
-  CONSTRAINT `fk_sentence_attempt_user_session` FOREIGN KEY (`session_id`, `user_id`) REFERENCES `sentence_translation_session` (`id`, `user_id`),
-  CONSTRAINT `chk_sentence_self_review` CHECK ((((`self_assessment` is null) and (`review_request_id` is null) and (`review_date` is null) and (`reviewed_at` is null)) or ((`self_assessment` is not null) and (`self_assessment` in (_utf8mb4'UNDERSTOOD',_utf8mb4'PARTIAL',_utf8mb4'NOT_UNDERSTOOD')) and (`review_request_id` is not null) and (`review_date` is not null) and (`reviewed_at` is not null) and (`reviewed_at` >= `submitted_at`)))),
-  CONSTRAINT `chk_sentence_submission` CHECK ((((`action` = _utf8mb4'ANSWER') and (`translation` is not null) and (char_length(trim(`translation`)) > 0)) or ((`action` = _utf8mb4'REVEAL') and (`translation` is null))))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `user_word_state` (
@@ -489,32 +410,9 @@ CREATE TABLE `user_sentence_note` (
   KEY `idx_sentence_note_user_updated` (`user_id`,`updated_at`,`id`),
   KEY `fk_sentence_note_question` (`sentence_id`),
   KEY `fk_sentence_note_attempt` (`attempt_id`,`user_id`,`sentence_id`),
-  CONSTRAINT `fk_sentence_note_attempt` FOREIGN KEY (`attempt_id`, `user_id`, `sentence_id`) REFERENCES `sentence_translation_attempt` (`id`, `user_id`, `sentence_id`),
   CONSTRAINT `fk_sentence_note_question` FOREIGN KEY (`sentence_id`) REFERENCES `sentence_question` (`id`),
   CONSTRAINT `fk_sentence_note_user` FOREIGN KEY (`user_id`) REFERENCES `user_account` (`id`),
   CONSTRAINT `chk_sentence_note_version` CHECK ((`version` >= 1))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-CREATE TABLE `user_sentence_review_state` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `user_id` bigint unsigned NOT NULL,
-  `sentence_id` bigint unsigned NOT NULL,
-  `last_attempt_id` bigint unsigned NOT NULL,
-  `review_level` tinyint unsigned NOT NULL,
-  `last_assessment` varchar(20) NOT NULL,
-  `reviewed_at` datetime(3) NOT NULL,
-  `next_review_date` date NOT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_sentence_review_user` (`user_id`,`sentence_id`),
-  KEY `idx_sentence_review_due` (`user_id`,`next_review_date`,`id`),
-  KEY `fk_sentence_review_question` (`sentence_id`),
-  KEY `fk_sentence_review_attempt` (`last_attempt_id`),
-  CONSTRAINT `fk_sentence_review_attempt` FOREIGN KEY (`last_attempt_id`) REFERENCES `sentence_translation_attempt` (`id`),
-  CONSTRAINT `fk_sentence_review_question` FOREIGN KEY (`sentence_id`) REFERENCES `sentence_question` (`id`),
-  CONSTRAINT `fk_sentence_review_user` FOREIGN KEY (`user_id`) REFERENCES `user_account` (`id`),
-  CONSTRAINT `chk_sentence_review_assessment` CHECK ((`last_assessment` in (_utf8mb4'UNDERSTOOD',_utf8mb4'PARTIAL',_utf8mb4'NOT_UNDERSTOOD'))),
-  CONSTRAINT `chk_sentence_review_date` CHECK ((`next_review_date` > cast(`reviewed_at` as date))),
-  CONSTRAINT `chk_sentence_review_level` CHECK ((`review_level` between 0 and 5))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `word_training_attempt` (
@@ -568,3 +466,12 @@ START TRANSACTION;
 INSERT INTO user_account (username,password_hash,nickname) VALUES
 ('test','$2a$12$mBJTwHhZAIlXrO7EeylhCuek62W6n9AcoOvY4XKPSP0TJyaY6IHx2','Test account');
 COMMIT;
+
+-- Sentence learning list, tags and translation records (migration 014).
+CREATE TABLE sentence_tag (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, category VARCHAR(32) NOT NULL, name VARCHAR(100) NOT NULL, UNIQUE KEY uk_sentence_tag_name (name));
+CREATE TABLE sentence_tag_relation (sentence_id BIGINT UNSIGNED NOT NULL, tag_id BIGINT UNSIGNED NOT NULL, PRIMARY KEY(sentence_id,tag_id), KEY idx_tag_sentence(tag_id,sentence_id), FOREIGN KEY(sentence_id) REFERENCES sentence_question(id), FOREIGN KEY(tag_id) REFERENCES sentence_tag(id));
+CREATE TABLE user_sentence_learning (user_id BIGINT UNSIGNED NOT NULL, sentence_id BIGINT UNSIGNED NOT NULL, added_at DATETIME(3) NOT NULL, PRIMARY KEY(user_id,sentence_id), FOREIGN KEY(user_id) REFERENCES user_account(id), FOREIGN KEY(sentence_id) REFERENCES sentence_question(id));
+CREATE TABLE sentence_translation_record (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, sentence_id BIGINT UNSIGNED NOT NULL, translation VARCHAR(2000) NOT NULL, request_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, created_at DATETIME(3) NOT NULL, UNIQUE KEY uk_sentence_record_request(user_id,request_id), UNIQUE KEY uk_sentence_record_identity(id,user_id,sentence_id), KEY idx_sentence_record_history(user_id,sentence_id,created_at,id), FOREIGN KEY(user_id) REFERENCES user_account(id), FOREIGN KEY(sentence_id) REFERENCES sentence_question(id));
+INSERT INTO sentence_tag(category,name) VALUES ('句式','疑问句'),('句式','祈使句'),('句式','感叹句'),('语法','条件句'),('语法','宾语从句'),('语法','定语从句'),('语法','被动语态'),('语法','比较级'),('场景与用途','问路'),('场景与用途','购物'),('场景与用途','餐饮'),('场景与用途','请求帮助'),('场景与用途','表达感谢'),('场景与用途','提出建议');
+
+ALTER TABLE user_sentence_note ADD CONSTRAINT fk_sentence_note_record FOREIGN KEY (attempt_id,user_id,sentence_id) REFERENCES sentence_translation_record (id,user_id,sentence_id);

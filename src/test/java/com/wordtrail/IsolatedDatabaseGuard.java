@@ -3,10 +3,10 @@ package com.wordtrail;
 import javax.sql.DataSource;
 import static org.junit.jupiter.api.Assertions.*;
 
-final class IsolatedDatabaseGuard {
+public final class IsolatedDatabaseGuard {
     private IsolatedDatabaseGuard() {}
 
-    static void check(DataSource dataSource) throws Exception {
+    public static void check(DataSource dataSource) throws Exception {
         try (var c=dataSource.getConnection()) {
             if(c.getMetaData().getURL().startsWith("jdbc:h2:mem:")) return;
             String expected=System.getenv("WORDTRAIL_MYSQL_TEST_SCHEMA");

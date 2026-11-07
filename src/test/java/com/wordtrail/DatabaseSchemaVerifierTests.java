@@ -22,6 +22,7 @@ class DatabaseSchemaVerifierTests {
             .setName("schema_guard;MODE=MySQL").build();
         if(initialize) new ResourceDatabasePopulator(new ClassPathResource("auth-schema.sql"),
             new ClassPathResource("sentence-schema.sql")).execute(database);
+        if(initialize) H2TestSchema.initialize(database);
         return new JdbcTemplate(database);
     }
     private ApplicationContextRunner runner(DataSource source) {

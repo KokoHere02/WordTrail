@@ -9,15 +9,15 @@ jobs:
   backup-scripts:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Parse backup scripts and reject invalid backups without database access
         shell: pwsh
         run: ./scripts/Test-BackupScripts.ps1
   h2:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '24'
@@ -42,27 +42,21 @@ jobs:
       DB_USERNAME: root
       DB_PASSWORD: ci-only-password
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '24'
           cache: maven
-      - name: Verify migrations in a generated database
+      - name: Initialize isolated MySQL database
         env:
-          WORDTRAIL_VERIFY_MYSQL: 'true'
+          MYSQL_PWD: ci-only-password
+          MYSQL_CONTAINER: ${{ job.services.mysql.id }}
         run: |
-          set -o pipefail
-          mvn -B -Dtest=LearningMigrationMySqlTests -DargLine=-XX:TieredStopAtLevel=1 test | tee migration.log
-          python3 - <<'PY'
-          import os, re
-          text = open('migration.log', encoding='utf-8').read()
-          schema = re.search(r'ISOLATED_MYSQL_VERIFICATION_SCHEMA=(wordtrail_daily_verify_[a-f0-9]{32})', text)
-          if not schema:
-              raise SystemExit('Missing isolated migration database')
-          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
-              output.write(f'WORDTRAIL_MYSQL_TEST_SCHEMA={schema[1]}\n')
-              output.write(f'DB_URL=jdbc:mysql://127.0.0.1:3306/{schema[1]}?characterEncoding=UTF-8&serverTimezone=Asia/Shanghai\n')
-          PY
+          schema="wordtrail_daily_verify_$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+          docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" mysql -u root -e "CREATE DATABASE $schema CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+          docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" mysql -u root "$schema" < src/main/resources/db/init.sql
+          echo "WORDTRAIL_MYSQL_TEST_SCHEMA=$schema" >> "$GITHUB_ENV"
+          echo "DB_URL=jdbc:mysql://127.0.0.1:3306/$schema?characterEncoding=UTF-8&serverTimezone=Asia/Shanghai" >> "$GITHUB_ENV"
       - name: Verify all application tests with MySQL
         run: mvn -B -Dspring.profiles.active=mysql-test -DargLine=-XX:TieredStopAtLevel=1 verify

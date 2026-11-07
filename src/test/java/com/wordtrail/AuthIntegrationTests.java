@@ -26,7 +26,7 @@ import static com.mybatisflex.core.query.QueryMethods.column;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(AuthIntegrationTests.TestTime.class)
+@Import({com.wordtrail.H2TestSchema.class, AuthIntegrationTests.TestTime.class})
 class AuthIntegrationTests {
     private static final String SECRET = Base64.getEncoder().encodeToString(Jwts.SIG.HS256.key().build().getEncoded());
     @DynamicPropertySource static void properties(DynamicPropertyRegistry registry) {
@@ -45,6 +45,10 @@ class AuthIntegrationTests {
     @TestConfiguration static class TestTime {
         @Bean @Primary TestClock testClock() { return new TestClock(); }
         @Bean AuthFailureProbe authFailureProbe(){return new AuthFailureProbe();}
+        @Bean @Primary com.wordtrail.security.SmsGateway fakeSmsGateway() { return new com.wordtrail.security.SmsGateway() {
+            public void send(String phone, String purpose) {}
+            public boolean verify(String phone, String code) { return "123456".equals(code); }
+        }; }
     }
     @org.apache.ibatis.plugin.Intercepts(@org.apache.ibatis.plugin.Signature(type=org.apache.ibatis.executor.Executor.class,method="update",args={org.apache.ibatis.mapping.MappedStatement.class,Object.class}))
     static class AuthFailureProbe implements org.apache.ibatis.plugin.Interceptor {
@@ -84,10 +88,12 @@ class AuthIntegrationTests {
     @Autowired private AuthSessionMapper authSessions;
     @Autowired private com.wordtrail.security.JwtTokenService jwt;
     @Autowired private AuthFailureProbe authFailure;
+    @Autowired private org.springframework.jdbc.core.JdbcTemplate db;
 
     @BeforeEach void resetTime() throws Exception {
         IsolatedDatabaseGuard.check(dataSource);
         clock.reset();
+        db.update("DELETE FROM sms_challenge"); db.update("DELETE FROM sms_send_log"); db.update("DELETE FROM auth_password_attempt");
         authFailure.failAfterMapper=null;
     }
 
@@ -101,7 +107,7 @@ class AuthIntegrationTests {
         createdUsers.clear();
     }
 
-    private String name() { return "u_" + UUID.randomUUID().toString().replace("-", "").substring(0, 20); }
+    private String name() { return "1" + (3 + java.util.concurrent.ThreadLocalRandom.current().nextInt(7)) + String.format("%09d", java.util.concurrent.ThreadLocalRandom.current().nextInt(1_000_000_000)); }
     private String url(String path) {
         return "http://localhost:" + environment.getRequiredProperty("local.server.port") + path;
     }
@@ -117,19 +123,28 @@ class AuthIntegrationTests {
         assertFalse(response.body().contains("passwordHash"));
         assertFalse(response.body().contains("$2a$"));
         assertTrue(response.headers().allValues("set-cookie").isEmpty());
-        if (path.equals("/api/auth/register") && response.statusCode() == 201) {
-            createdUsers.add(json.readTree(response.body()).at("/data/id").asLong());
+        return response;
+    }
+    private HttpResponse<String> register(String phone, String password) throws Exception {
+        db.update("DELETE FROM sms_send_log");
+        assertEquals(200, call("POST", "/api/auth/phone/send", Map.of("phone", phone, "purpose", "REGISTER"), null).statusCode());
+        var response = call("POST", "/api/auth/phone/register", Map.of("phone", phone, "code", "123456", "password", password), null);
+        if (response.statusCode() == 200) {
+            long id=json.readTree(response.body()).at("/data/user/id").asLong();
+            createdUsers.add(id);
+            refreshTokens.deleteByQuery(QueryWrapper.create().where(column("user_id").eq(id)));
+            authSessions.deleteByQuery(QueryWrapper.create().where(column("user_id").eq(id)));
         }
         return response;
     }
-    private HttpResponse<String> register(String username, String password) throws Exception {
-        return call("POST", "/api/auth/register",
-            Map.of("username", username, "password", password, "nickname", "昵称"), null);
-    }
-    private JsonNode pair(String username, String password) throws Exception {
-        var response = call("POST", "/api/auth/login", Map.of("username", username, "password", password), null);
+    private JsonNode pair(String phone, String password) throws Exception {
+        var response = call("POST", "/api/auth/phone/password-login", Map.of("phone", phone, "password", password), null);
         assertEquals(200, response.statusCode());
         return json.readTree(response.body()).get("data");
+    }
+    private void sendPasswordCode(String phone, String access) throws Exception {
+        db.update("DELETE FROM sms_send_log");
+        assertEquals(200, call("POST", "/api/auth/phone/send-auth", Map.of("phone", phone, "purpose", "PASSWORD"), access).statusCode());
     }
     private HttpResponse<String> refresh(String raw) throws Exception {
         // A deliberately invalid Access Token must not block the public refresh endpoint.
@@ -142,9 +157,9 @@ class AuthIntegrationTests {
     @Test void registerLoginAndMeWithoutCookieOrCsrf() throws Exception {
         String username = name();
         var registered = register(username, " password ");
-        assertEquals(201, registered.statusCode());
+        assertEquals(200, registered.statusCode());
         assertEquals(401, call("GET", "/api/auth/me", null, null).statusCode());
-        var tokens = pair(username.toUpperCase(Locale.ROOT), " password ");
+        var tokens = pair(username, " password ");
         assertEquals("Bearer", tokens.get("tokenType").asText());
         assertEquals(1800, tokens.get("expiresIn").asLong());
         String access = tokens.get("accessToken").asText();
@@ -153,9 +168,7 @@ class AuthIntegrationTests {
         var me = call("GET", "/api/auth/me?user_id=99999", null, access);
         assertEquals(200, me.statusCode());
         var user = json.readTree(me.body()).get("data");
-        assertEquals(username, user.get("username").asText());
-        assertEquals("昵称", user.get("nickname").asText());
-        assertEquals(3, user.size());
+        assertEquals(username, user.get("phone").asText());
         assertEquals(200, call("GET", "/api/auth/me", null, access).statusCode());
         assertEquals(401, call("GET", "/api/auth/me", null, null).statusCode());
         var stored = refreshTokens.selectOneByQuery(QueryWrapper.create().where(column("token_hash").eq(hash(refresh))));
@@ -169,30 +182,23 @@ class AuthIntegrationTests {
     }
 
     @Test void duplicateAndInvalidRegistration() throws Exception {
-        String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
-        var duplicate = register(username.toUpperCase(Locale.ROOT), "password456");
-        assertEquals(409, duplicate.statusCode());
-        assertEquals("USERNAME_EXISTS", json.readTree(duplicate.body()).get("code").asText());
-        for (String invalid : List.of("abc", "a".repeat(33), "has space", "中文用户名")) {
-            assertEquals(400, register(invalid, "password123").statusCode());
-        }
-        for (String password : List.of("", "short", "x".repeat(65))) {
-            var response = register(name(), password);
-            assertEquals(400, response.statusCode());
-            if (!password.isEmpty()) { assertFalse(response.body().contains(password)); }
-        }
-        assertEquals(400, call("POST", "/api/auth/register", Map.of(), null).statusCode());
-        assertEquals(400, call("POST", "/api/auth/register",
-            Map.of("username", name(), "password", "password123", "nickname", "n".repeat(65)), null).statusCode());
-        assertEquals(201, register("a".repeat(10) + name(), "x".repeat(64)).statusCode());
+        String phone=name();
+        assertEquals(200, register(phone, "password123").statusCode());
+        var duplicate=register(phone,"password456");
+        assertEquals(409,duplicate.statusCode());
+        assertEquals("PHONE_EXISTS",json.readTree(duplicate.body()).get("code").asText());
+        assertEquals(400,call("POST","/api/auth/phone/register",Map.of(),null).statusCode());
+        for (String invalid : List.of("abc", "123", "123456789012"))
+            assertEquals(400,call("POST","/api/auth/phone/register",Map.of("phone",invalid,"code","123456","password","password123"),null).statusCode());
+        for (String password : List.of("", "short", "x".repeat(65)))
+            assertEquals(400,call("POST","/api/auth/phone/register",Map.of("phone",name(),"code","123456","password",password),null).statusCode());
     }
 
     @Test void loginFailureIsUniformAndDoesNotTrimPasswords() throws Exception {
         String username = name();
-        assertEquals(201, register(username, " password ").statusCode());
-        var wrong = call("POST", "/api/auth/login", Map.of("username", username, "password", "password"), null);
-        var missing = call("POST", "/api/auth/login", Map.of("username", name(), "password", "password"), null);
+        assertEquals(200, register(username, " password ").statusCode());
+        var wrong = call("POST", "/api/auth/phone/password-login", Map.of("phone", username, "password", "password"), null);
+        var missing = call("POST", "/api/auth/phone/password-login", Map.of("phone", name(), "password", "password"), null);
         assertEquals(401, wrong.statusCode());
         assertEquals(wrong.body(), missing.body());
         assertEquals("账号或密码错误", json.readTree(wrong.body()).get("message").asText());
@@ -201,15 +207,15 @@ class AuthIntegrationTests {
 
     @Test void unicodePasswordsRemainDistinctBeyondBcryptByteLimit() throws Exception {
         String username = name(), password = "密".repeat(63) + "码";
-        assertEquals(201, register(username, password).statusCode());
-        assertEquals(401, call("POST", "/api/auth/login",
-            Map.of("username", username, "password", "密".repeat(63) + "错"), null).statusCode());
+        assertEquals(200, register(username, password).statusCode());
+        assertEquals(401, call("POST", "/api/auth/phone/password-login",
+            Map.of("phone", username, "password", "密".repeat(63) + "错"), null).statusCode());
         assertNotNull(pair(username, password).get("accessToken"));
     }
 
     @Test void missingMalformedTamperedAndExpiredAccessTokensReturnSame401() throws Exception {
         String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
+        assertEquals(200, register(username, "password123").statusCode());
         var pair = pair(username, "password123");
         String access = pair.get("accessToken").asText();
         String[] parts = access.split("\\.");
@@ -231,7 +237,7 @@ class AuthIntegrationTests {
 
     @Test void refreshRotatesAndOldValueCannotBeReused() throws Exception {
         String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
+        assertEquals(200, register(username, "password123").statusCode());
         var first = pair(username, "password123");
         String old = first.get("refreshToken").asText();
         var response = refresh(old);
@@ -247,7 +253,7 @@ class AuthIntegrationTests {
 
     @Test void concurrentRefreshHasExactlyOneWinner() throws Exception {
         String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
+        assertEquals(200, register(username, "password123").statusCode());
         String raw = pair(username, "password123").get("refreshToken").asText();
         var gate = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
@@ -262,7 +268,7 @@ class AuthIntegrationTests {
 
     @Test void failedTransactionRestoresOldRefreshToken() throws Exception {
         String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
+        assertEquals(200, register(username, "password123").statusCode());
         String raw = pair(username, "password123").get("refreshToken").asText();
         var transaction = new TransactionTemplate(transactions);
         assertThrows(IllegalStateException.class, () -> transaction.execute(status -> {
@@ -276,7 +282,7 @@ class AuthIntegrationTests {
 
     @Test void expiredRefreshCannotBeUsed() throws Exception {
         String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
+        assertEquals(200, register(username, "password123").statusCode());
         String raw = pair(username, "password123").get("refreshToken").asText();
         clock.advance(Duration.ofDays(8));
         assertEquals(401, refresh(raw).statusCode());
@@ -286,7 +292,7 @@ class AuthIntegrationTests {
 
     @Test void logoutIsIdempotentAndOnlyAffectsSubmittedDevice() throws Exception {
         String username = name();
-        assertEquals(201, register(username, "password123").statusCode());
+        assertEquals(200, register(username, "password123").statusCode());
         var first = pair(username, "password123");
         var second = pair(username, "password123");
         assertNotEquals(first.get("refreshToken").asText(), second.get("refreshToken").asText());
@@ -301,13 +307,13 @@ class AuthIntegrationTests {
 
     @Test void accountsAndSequentialRequestsHaveIndependentIdentities() throws Exception {
         String first = name(), second = name();
-        assertEquals(201, register(first, "password123").statusCode());
-        assertEquals(201, register(second, "password123").statusCode());
+        assertEquals(200, register(first, "password123").statusCode());
+        assertEquals(200, register(second, "password123").statusCode());
         String a = pair(first, "password123").get("accessToken").asText();
         String b = pair(second, "password123").get("accessToken").asText();
         for (String token : List.of(a, b, a)) {
             var me = call("GET", "/api/auth/me", null, token);
-            assertEquals(token.equals(a) ? first : second, json.readTree(me.body()).at("/data/username").asText());
+            assertEquals(token.equals(a) ? first : second, json.readTree(me.body()).at("/data/phone").asText());
             assertEquals(401, call("GET", "/api/auth/me", null, null).statusCode());
         }
     }
@@ -334,21 +340,22 @@ class AuthIntegrationTests {
 
     @Test void changingPasswordPreservesUnicodeAndSpacesAndRevokesEveryDeviceAndLegacyAccess() throws Exception {
         String username=name(),old=" password123 ",changed=" 新密码"+"密".repeat(28)+" ";register(username,old);var first=pair(username,old);var second=pair(username,old);long id=first.get("user").get("id").asLong();String legacy=jwt.issue(id);
-        assertEquals(200,call("PUT","/api/auth/password",Map.of("currentPassword",old,"newPassword",changed),first.get("accessToken").asString()).statusCode());
+        sendPasswordCode(username,first.get("accessToken").asString());
+        assertEquals(200,call("PUT","/api/auth/phone/password",Map.of("code","123456","newPassword",changed),first.get("accessToken").asString()).statusCode());
         for(String access:List.of(first.get("accessToken").asString(),second.get("accessToken").asString(),legacy))assertEquals(401,call("GET","/api/auth/me",null,access).statusCode());
         for(var previous:List.of(first,second))assertEquals(401,refresh(previous.get("refreshToken").asString()).statusCode());
-        assertEquals(401,call("POST","/api/auth/login",Map.of("username",username,"password",old),null).statusCode());
-        assertEquals(401,call("POST","/api/auth/login",Map.of("username",username,"password",changed.strip()),null).statusCode());
+        assertEquals(401,call("POST","/api/auth/phone/password-login",Map.of("phone",username,"password",old),null).statusCode());
+        assertEquals(401,call("POST","/api/auth/phone/password-login",Map.of("phone",username,"password",changed.strip()),null).statusCode());
         var next=pair(username,changed);assertEquals(id,next.get("user").get("id").asLong());assertEquals(200,call("GET","/api/auth/me",null,next.get("accessToken").asString()).statusCode());
     }
 
     @Test void invalidPasswordChangesLeaveCredentialsAndSessionsUntouched() throws Exception {
-        String username=name();register(username,"password123");var tokens=pair(username,"password123");String access=tokens.get("accessToken").asString();
-        assertEquals(401,call("PUT","/api/auth/password",Map.of("currentPassword","incorrect-password","newPassword","new-password"),access).statusCode());
-        assertEquals(409,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","password123"),access).statusCode());
-        assertEquals(400,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","short"),access).statusCode());
-        assertEquals(400,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","new-password","userId",999),access).statusCode());
-        assertEquals(200,call("GET","/api/auth/me",null,access).statusCode());assertEquals(200,refresh(tokens.get("refreshToken").asString()).statusCode());
+        String phone=name(); register(phone,"password123"); var tokens=pair(phone,"password123"); String access=tokens.get("accessToken").asString();
+        sendPasswordCode(phone,access);
+        assertEquals(400,call("PUT","/api/auth/phone/password",Map.of("code","000000","newPassword","new-password"),access).statusCode());
+        assertEquals(400,call("PUT","/api/auth/phone/password",Map.of("code","123456","newPassword","short"),access).statusCode());
+        assertEquals(200,call("GET","/api/auth/me",null,access).statusCode());
+        assertEquals(200,refresh(tokens.get("refreshToken").asString()).statusCode());
     }
 
     @Test void logoutWithConsumedRefreshDoesNotTerminateItsReplacementSession() throws Exception {
@@ -367,8 +374,9 @@ class AuthIntegrationTests {
 
     @Test void passwordAndLogoutOtherDeviceFailuresRollBackVersionHashesAndRevocations() throws Exception {
         String username=name();register(username,"password123");var first=pair(username,"password123");var second=pair(username,"password123");String access=first.get("accessToken").asString();
+        sendPasswordCode(username,access);
         authFailure.failAfterMapper="com.wordtrail.user.mapper.AuthSessionMapper";
-        try{assertEquals(500,call("PUT","/api/auth/password",Map.of("currentPassword","password123","newPassword","changed-password"),access).statusCode());}finally{authFailure.failAfterMapper=null;}
+        try{assertEquals(500,call("PUT","/api/auth/phone/password",Map.of("code","123456","newPassword","changed-password"),access).statusCode());}finally{authFailure.failAfterMapper=null;}
         assertEquals(200,call("GET","/api/auth/me",null,access).statusCode());assertEquals(0,users.selectOneById(first.get("user").get("id").asLong()).getAuthVersion());
         assertEquals(2,sessionPage(access).get("total").asLong());assertTrue(passwords.matches("password123",users.selectOneById(first.get("user").get("id").asLong()).getPasswordHash()));
         authFailure.failAfterMapper="com.wordtrail.user.mapper.RefreshTokenMapper";
@@ -388,16 +396,16 @@ class AuthIntegrationTests {
     }
 
     @Test void deviceLabelsAreOptionalBoundedAndNeverReplaceServerAuthorization() throws Exception {
-        String username=name();register(username,"password123");var response=call("POST","/api/auth/login",Map.of("username",username,"password","password123","deviceName","我的浏览器"),null);assertEquals(200,response.statusCode());String access=json.readTree(response.body()).get("data").get("accessToken").asString();
+        String username=name();register(username,"password123");var response=call("POST","/api/auth/phone/password-login",Map.of("phone",username,"password","password123","deviceName","我的浏览器"),null);assertEquals(200,response.statusCode());String access=json.readTree(response.body()).get("data").get("accessToken").asString();
         assertEquals("我的浏览器",sessionPage(access).get("records").get(0).get("deviceName").asString());
-        assertEquals(400,call("POST","/api/auth/login",Map.of("username",username,"password","password123","deviceName","x".repeat(101)),null).statusCode());
+        assertEquals(400,call("POST","/api/auth/phone/password-login",Map.of("phone",username,"password","password123","deviceName","x".repeat(101)),null).statusCode());
         assertEquals(400,call("POST","/api/auth/sessions/not-an-id/revoke",null,access).statusCode());
     }
 
     @Test void corsAllowsOnlyConfiguredOriginsAndAuthorizationHeader() throws Exception {
         for (String origin : List.of("http://localhost:5173", "http://127.0.0.1:5173", "https://untrusted.example")) {
             for (String method : List.of("GET", "POST")) {
-                String path = method.equals("POST") ? "/api/auth/login" : "/api/auth/me";
+                String path = method.equals("POST") ? "/api/auth/phone/password-login" : "/api/auth/me";
                 String header = method.equals("POST") ? "content-type" : "authorization";
                 var request = HttpRequest.newBuilder(URI.create(url(path)))
                     .header("Origin", origin).header("Access-Control-Request-Method", method)
@@ -416,9 +424,9 @@ class AuthIntegrationTests {
                 }
             }
             if (!origin.equals("https://untrusted.example")) {
-                var login = HttpRequest.newBuilder(URI.create(url("/api/auth/login")))
+                var login = HttpRequest.newBuilder(URI.create(url("/api/auth/phone/password-login")))
                     .header("Origin", origin).header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"username\":\"user\",\"password\":\"short\"}"))
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"phone\":\"invalid\",\"password\":\"short\"}"))
                     .build();
                 var response = client.send(login, HttpResponse.BodyHandlers.ofString());
                 assertEquals(400, response.statusCode());

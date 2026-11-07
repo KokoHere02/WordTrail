@@ -35,7 +35,7 @@ import static com.mybatisflex.core.query.QueryMethods.column;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(LearningIntegrationTests.Instrumentation.class)
+@Import({com.wordtrail.H2TestSchema.class, LearningIntegrationTests.Instrumentation.class})
 class LearningIntegrationTests {
     private static final String SECRET = Base64.getEncoder().encodeToString(Jwts.SIG.HS256.key().build().getEncoded());
     @DynamicPropertySource static void properties(DynamicPropertyRegistry registry) {
@@ -824,16 +824,16 @@ class LearningIntegrationTests {
     }
 
     @Test void dailyQueueSurvivesLogoutRefreshAndRelogin() throws Exception {
-        var account=users.selectOneById(a); account.setPasswordHash(passwords.hash("password123")); users.update(account);
-        var credentials=Map.of("username",account.getUsername(),"password","password123");
-        var login=call("POST","/api/auth/login",credentials,null); assertEquals(200,login.statusCode());
+        var account=users.selectOneById(a); account.setPhone("139"+String.format("%08d",a % 100000000)); account.setPasswordHash(passwords.hash("password123")); users.update(account);
+        var credentials=Map.of("phone",account.getPhone(),"password","password123");
+        var login=call("POST","/api/auth/phone/password-login",credentials,null); assertEquals(200,login.statusCode());
         var pair=json.readTree(login.body()).get("data"); tokenA=pair.get("accessToken").asText();
         joinPlan(wordIds.get(1),wordIds.get(2)); long batch=startDay().get("batchId").asLong();
         dailyAnswer(batch,itemId(batch),3,1); var before=get(dailyPath(batch),tokenA);
         var refresh=call("POST","/api/auth/refresh",Map.of("refreshToken",pair.get("refreshToken").asText()),null);
         assertEquals(200,refresh.statusCode()); var rotated=json.readTree(refresh.body()).get("data");
         assertEquals(200,call("POST","/api/auth/logout",Map.of("refreshToken",rotated.get("refreshToken").asText()),null).statusCode());
-        var relogin=call("POST","/api/auth/login",credentials,null); assertEquals(200,relogin.statusCode());
+        var relogin=call("POST","/api/auth/phone/password-login",credentials,null); assertEquals(200,relogin.statusCode());
         tokenA=json.readTree(relogin.body()).at("/data/accessToken").asText();
         assertEquals(before,get(dailyPath(batch),tokenA)); assertEquals(batch,startDay().get("batchId").asLong());
     }
@@ -1223,13 +1223,13 @@ class LearningIntegrationTests {
 
     @Test void settingsPersistAfterLogoutAndRelogin() throws Exception {
         updateSettings(47);
-        var account=users.selectOneById(a); account.setPasswordHash(passwords.hash("password123")); users.update(account);
-        var credentials=Map.of("username",account.getUsername(),"password","password123");
-        var login=call("POST","/api/auth/login",credentials,null); assertEquals(200,login.statusCode());
+        var account=users.selectOneById(a); account.setPhone("139"+String.format("%08d",a % 100000000)); account.setPasswordHash(passwords.hash("password123")); users.update(account);
+        var credentials=Map.of("phone",account.getPhone(),"password","password123");
+        var login=call("POST","/api/auth/phone/password-login",credentials,null); assertEquals(200,login.statusCode());
         var pair=json.readTree(login.body()).get("data"); tokenA=pair.get("accessToken").asText();
         assertEquals(47,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
         assertEquals(200,call("POST","/api/auth/logout",Map.of("refreshToken",pair.get("refreshToken").asText()),null).statusCode());
-        var relogin=call("POST","/api/auth/login",credentials,null); assertEquals(200,relogin.statusCode());
+        var relogin=call("POST","/api/auth/phone/password-login",credentials,null); assertEquals(200,relogin.statusCode());
         tokenA=json.readTree(relogin.body()).at("/data/accessToken").asText();
         assertEquals(47,get("/api/learning/settings",tokenA).get("dailyTarget").asInt());
         assertEquals(47,learningSettings.selectOneById(a).getDailyTarget()); assertEquals(1,settingsCount(a));

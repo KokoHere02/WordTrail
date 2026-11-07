@@ -13,6 +13,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionTemplate;
 import static org.junit.jupiter.api.Assertions.*;
 
+@org.springframework.context.annotation.Import(com.wordtrail.H2TestSchema.class)
 @SpringBootTest
 class SentencePracticeTransactionTests {
     @DynamicPropertySource static void properties(DynamicPropertyRegistry registry) {
