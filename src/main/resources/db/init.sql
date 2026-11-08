@@ -32,6 +32,7 @@ CREATE TABLE `user_account` (
   `username` varchar(64) NOT NULL COMMENT '登录账号',
   `phone` varchar(11) DEFAULT NULL,
   `email` varchar(254) DEFAULT NULL,
+  `email_verified` boolean NOT NULL DEFAULT FALSE,
   `password_hash` varchar(255) NOT NULL COMMENT '密码哈希，如BCrypt',
   `nickname` varchar(64) DEFAULT NULL COMMENT '昵称',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -48,6 +49,11 @@ INSERT INTO sms_send_guard VALUES (1);
 CREATE TABLE sms_send_log (phone VARCHAR(11) NOT NULL, client_ip VARCHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, KEY idx_sms_phone(phone,created_at), KEY idx_sms_ip(client_ip,created_at), KEY idx_sms_time(created_at));
 CREATE TABLE auth_password_attempt (phone VARCHAR(11) NOT NULL, client_ip VARCHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, KEY idx_auth_attempt_phone(phone,created_at), KEY idx_auth_attempt_ip(client_ip,created_at));
 CREATE TABLE sms_challenge (phone VARCHAR(11) PRIMARY KEY, purpose VARCHAR(24) NOT NULL, owner_id BIGINT DEFAULT NULL, session_id VARCHAR(32) DEFAULT NULL, expires_at DATETIME(6) NOT NULL, attempts INT NOT NULL, consumed BOOLEAN NOT NULL);
+CREATE TABLE email_send_guard (id INT PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO email_send_guard VALUES (1);
+CREATE TABLE email_send_log (id VARCHAR(36) PRIMARY KEY, email VARCHAR(254) NOT NULL, client_ip CHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, KEY idx_email_send_email(email,created_at), KEY idx_email_send_ip(client_ip,created_at), KEY idx_email_send_time(created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE email_challenge (email VARCHAR(254) PRIMARY KEY, purpose VARCHAR(24) NOT NULL, owner_id BIGINT DEFAULT NULL, session_id VARCHAR(32) DEFAULT NULL, token_id VARCHAR(36) NOT NULL, code_hash CHAR(64) NOT NULL, expires_at DATETIME(6) NOT NULL, attempts INT NOT NULL, consumed BOOLEAN NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE email_password_attempt (email VARCHAR(254) NOT NULL, client_ip CHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, KEY idx_email_password_email(email,created_at), KEY idx_email_password_ip(client_ip,created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE `word` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '单词ID',

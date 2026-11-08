@@ -18,6 +18,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.core.env.Environment;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.mybatis.spring.SqlSessionTemplate;
 import java.time.Clock;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -43,6 +44,7 @@ class PhoneAuthTests {
     @Autowired ObjectMapper json;
     @Autowired Clock clock;
     @Autowired PlatformTransactionManager transactions;
+    @Autowired SqlSessionTemplate sqlSession;
     @BeforeEach void clear() throws Exception { com.wordtrail.IsolatedDatabaseGuard.check(db.getDataSource()); db.update("DELETE FROM sms_challenge"); db.update("DELETE FROM sms_send_log"); db.update("DELETE FROM auth_password_attempt"); }
     @AfterEach void unbind() { current.clear(); }
 
@@ -79,10 +81,46 @@ class PhoneAuthTests {
     }
     @Test void missingConfigurationDoesNotConsumeSmsQuota() {
         var gateway=new AliyunSmsGateway("test-id","test-secret","",json);
-        var service=new SmsVerificationService(db,gateway,clock,transactions,10);
+        var service=new SmsVerificationService(sqlSession,gateway,clock,transactions,10);
         assertThrows(BusinessException.class,()->service.send("13800000007","LOGIN",null,null,"127.0.0.1"));
         assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM sms_send_log",Integer.class));
         assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM sms_challenge",Integer.class));
+    }
+    @Test void failedSendsDoNotConsumeQuotaOrLeaveAnActiveChallenge() {
+        String phone="13800000009";
+        SmsGateway failing=new SmsGateway() {
+            public void send(String p,String purpose) { throw new IllegalStateException("provider failed"); }
+            public boolean verify(String p,String code) { return true; }
+        };
+        var service=new SmsVerificationService(sqlSession,failing,clock,transactions,10);
+        for(int i=0;i<12;i++)
+            assertThrows(IllegalStateException.class,()->service.send(phone,"LOGIN",null,null,"127.0.0.1"));
+        assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM sms_send_log",Integer.class));
+        assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM sms_challenge",Integer.class));
+        sms.send(phone,"LOGIN",null,null,"127.0.0.1");
+        sms.verify(phone,"LOGIN",null,null,"123456");
+        assertThrows(BusinessException.class,()->sms.send(phone,"LOGIN",null,null,"127.0.0.1"));
+    }
+    @Test void concurrentSmsSendAndVerificationAllowOnlyOneSuccess() throws Exception {
+        String phone="13800000010";
+        try(var pool=java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var ready=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.Callable<Boolean> send=()->{
+                ready.await();
+                try { sms.send(phone,"LOGIN",null,null,"127.0.0.1"); return true; }
+                catch(BusinessException ex) { assertEquals("SMS_RATE_LIMIT",ex.code()); return false; }
+            };
+            var first=pool.submit(send);var second=pool.submit(send);ready.countDown();
+            assertNotEquals(first.get(10,java.util.concurrent.TimeUnit.SECONDS),second.get(10,java.util.concurrent.TimeUnit.SECONDS));
+            var verifyReady=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.Callable<Boolean> verify=()->{
+                verifyReady.await();
+                try { sms.verify(phone,"LOGIN",null,null,"123456"); return true; }
+                catch(BusinessException ex) { assertEquals("INVALID_SMS_CODE",ex.code()); return false; }
+            };
+            var a=pool.submit(verify);var b=pool.submit(verify);verifyReady.countDown();
+            assertNotEquals(a.get(10,java.util.concurrent.TimeUnit.SECONDS),b.get(10,java.util.concurrent.TimeUnit.SECONDS));
+        }
     }
     @Test void unregisteredPhoneCreatesAccountAfterCodeVerification() throws Exception {
         String phone="13800000008";

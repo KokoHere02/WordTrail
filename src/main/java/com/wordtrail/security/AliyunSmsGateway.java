@@ -40,7 +40,7 @@ public class AliyunSmsGateway implements SmsGateway {
     @Override public void send(String phone, String purpose) {
         String template = switch (purpose) {
             case "REGISTER", "LOGIN" -> "100001";
-            case "PASSWORD" -> "100003";
+            case "PASSWORD", "EMAIL_BIND" -> "100003";
             case "CHANGE_OLD" -> "100005";
             case "CHANGE_NEW" -> "100004";
             default -> throw new IllegalArgumentException("Unsupported SMS purpose");

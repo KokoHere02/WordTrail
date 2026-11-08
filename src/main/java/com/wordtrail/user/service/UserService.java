@@ -112,6 +112,62 @@ public class UserService {
         }
         return issuePair(account,newSession(account,deviceName));
     }
+    @Transactional
+    public TokenVO registerEmail(String email,String password,String deviceName) {
+        var account=new UserAccount();
+        account.setUsername("u_"+UUID.randomUUID().toString().replace("-",""));
+        account.setEmail(email); account.setEmailVerified(true); account.setPasswordHash(passwords.hash(password)); account.setAuthVersion(0L);
+        try { requireWrite(users.insertSelective(account)); }
+        catch(DuplicateKeyException ex) { throw emailExists(); }
+        return issuePair(account,newSession(account,deviceName));
+    }
+    @Transactional
+    public TokenVO passwordEmail(String email,String password,String deviceName) {
+        var account=users.selectOneByQuery(QueryWrapper.create().where(column("email").eq(email)).and(column("email_verified").eq(true)).forUpdate());
+        if(!passwords.matches(password,account==null?null:account.getPasswordHash()))
+            throw new BusinessException(HttpStatus.UNAUTHORIZED,"BAD_CREDENTIALS","账号或密码错误");
+        return issuePair(account,newSession(account,deviceName));
+    }
+    @Transactional
+    public TokenVO loginEmail(String email,String deviceName) {
+        var account=users.selectOneByQuery(QueryWrapper.create().where(column("email").eq(email)).and(column("email_verified").eq(true)).forUpdate());
+        if(account==null) throw new BusinessException(HttpStatus.UNAUTHORIZED,"BAD_CREDENTIALS","邮箱未注册或未绑定");
+        return issuePair(account,newSession(account,deviceName));
+    }
+    @Transactional
+    public void bindEmail(String email,String password) {
+        var account=lock(current.id()); requireIdentity(account);
+        if(password!=null) requirePassword(password,account);
+        if(Boolean.TRUE.equals(account.getEmailVerified())) throw new BusinessException(HttpStatus.CONFLICT,"EMAIL_ALREADY_BOUND","当前账户已绑定邮箱");
+        var patch=new UserAccount(); patch.setId(account.getId()); patch.setEmail(email); patch.setEmailVerified(true);
+        try { requireWrite(users.update(patch)); }
+        catch(DuplicateKeyException ex) { throw emailExists(); }
+    }
+    private static BusinessException emailExists() { return new BusinessException(HttpStatus.CONFLICT,"EMAIL_EXISTS","该邮箱已被使用"); }
+    public String currentEmail() {
+        var account=users.selectOneById(current.id());
+        if(account==null || !Boolean.TRUE.equals(account.getEmailVerified()) || account.getEmail()==null)
+            throw new BusinessException(HttpStatus.CONFLICT,"EMAIL_NOT_BOUND","当前账户未绑定邮箱");
+        return account.getEmail();
+    }
+    @Transactional
+    public void setEmailPassword(String email,String password) {
+        var account=lock(current.id()); requireIdentity(account);
+        if(!Boolean.TRUE.equals(account.getEmailVerified()) || !email.equals(account.getEmail())) throw JwtTokenService.unauthorized();
+        var patch=new UserAccount(); patch.setId(account.getId());patch.setPasswordHash(passwords.hash(password));
+        patch.setAuthVersion(Math.addExact(account.getAuthVersion(),1));requireWrite(users.update(patch));revokeAll(account.getId(),null);
+    }
+    @Transactional
+    public void changeEmail(String oldEmail,String newEmail) {
+        var account=lock(current.id()); requireIdentity(account);
+        if(!Boolean.TRUE.equals(account.getEmailVerified()) || !oldEmail.equals(account.getEmail())) throw JwtTokenService.unauthorized();
+        if(oldEmail.equals(newEmail)) throw new BusinessException(HttpStatus.CONFLICT,"EMAIL_UNCHANGED","新邮箱不能与原邮箱相同");
+        var patch=new UserAccount(); patch.setId(account.getId()); patch.setEmail(newEmail);
+        patch.setAuthVersion(Math.addExact(account.getAuthVersion(),1));
+        try { requireWrite(users.update(patch)); }
+        catch(DuplicateKeyException ex) { throw emailExists(); }
+        revokeAll(account.getId(),null);
+    }
     public String currentPhone() {
         var account=users.selectOneById(current.id());
         if(account==null || account.getPhone()==null) throw new BusinessException(HttpStatus.CONFLICT,"PHONE_NOT_BOUND","当前账户未绑定手机号");

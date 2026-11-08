@@ -21,7 +21,7 @@ public class PhoneAuthController {
     public record Send(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone,
                        @NotNull @Pattern(regexp="REGISTER|LOGIN") String purpose) {}
     public record ProtectedSend(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone,
-                       @NotNull @Pattern(regexp="PASSWORD|CHANGE_OLD|CHANGE_NEW") String purpose) {}
+                       @NotNull @Pattern(regexp="PASSWORD|CHANGE_OLD|CHANGE_NEW|EMAIL_BIND") String purpose) {}
     public record Register(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone,
             @NotNull @Pattern(regexp="[0-9]{6}") String code,
             @NotNull @CodePointLength(min=8,max=64) String password,

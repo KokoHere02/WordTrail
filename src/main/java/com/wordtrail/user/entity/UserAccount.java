@@ -19,6 +19,7 @@ public class UserAccount {
     private String username;
     private String phone;
     private String email;
+    private Boolean emailVerified;
     @JsonIgnore
     @Column("password_hash")
     private String passwordHash;

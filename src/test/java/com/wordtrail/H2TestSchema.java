@@ -22,6 +22,12 @@ public class H2TestSchema {
         var db = new JdbcTemplate(source);
         db.execute("ALTER TABLE user_account ADD COLUMN IF NOT EXISTS phone VARCHAR(11) UNIQUE");
         db.execute("ALTER TABLE user_account ADD COLUMN IF NOT EXISTS email VARCHAR_IGNORECASE(254) UNIQUE");
+        db.execute("ALTER TABLE user_account ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE");
+        db.execute("CREATE TABLE IF NOT EXISTS email_send_guard (id INT PRIMARY KEY)");
+        db.execute("MERGE INTO email_send_guard KEY(id) VALUES (1)");
+        db.execute("CREATE TABLE IF NOT EXISTS email_send_log (id VARCHAR(36) PRIMARY KEY, email VARCHAR_IGNORECASE(254) NOT NULL, client_ip CHAR(64) NOT NULL, created_at TIMESTAMP NOT NULL)");
+        db.execute("CREATE TABLE IF NOT EXISTS email_challenge (email VARCHAR_IGNORECASE(254) PRIMARY KEY, purpose VARCHAR(24) NOT NULL, owner_id BIGINT, session_id VARCHAR(32), token_id VARCHAR(36) NOT NULL, code_hash CHAR(64) NOT NULL, expires_at TIMESTAMP NOT NULL, attempts INT NOT NULL, consumed BOOLEAN NOT NULL)");
+        db.execute("CREATE TABLE IF NOT EXISTS email_password_attempt (email VARCHAR_IGNORECASE(254) NOT NULL, client_ip CHAR(64) NOT NULL, created_at TIMESTAMP NOT NULL)");
         db.execute("CREATE TABLE IF NOT EXISTS sms_send_guard (id INT PRIMARY KEY)");
         db.execute("MERGE INTO sms_send_guard KEY(id) VALUES (1)");
         db.execute("CREATE TABLE IF NOT EXISTS sms_send_log (phone VARCHAR(11) NOT NULL, client_ip VARCHAR(64) NOT NULL, created_at TIMESTAMP NOT NULL)");
