@@ -3306,6 +3306,38 @@ class LearningIntegrationTests {
         assertEquals(1,get(dailyPath(task.get("batchId").asLong()),tokenA).get("newWordTarget").asInt());
     }
 
+    @Test void automaticConsolidationImportsAndResumesAllOutstandingWords() throws Exception {
+        assertEquals(409,call("POST","/api/learning/consolidation/automatic",Map.of("requestId",requestId()),tokenB).statusCode());
+        joinPlan(wordIds.get(1),wordIds.get(2)); long daily=startDay().get("batchId").asLong(); studyMode(daily,"DICTATION");
+        train(daily,trainingQuestion(daily,null),"wrong",null);
+        String key=requestId(); var first=call("POST","/api/learning/consolidation/automatic",Map.of("requestId",key),tokenA);
+        assertEquals(200,first.statusCode()); long focus=data(first).get("batchId").asLong(); assertEquals(1,data(first).get("totalCount").asInt());
+        assertEquals(focus,data(call("POST","/api/learning/consolidation/automatic",Map.of("requestId",key),tokenA)).get("batchId").asLong());
+        train(daily,trainingQuestion(daily,null),"wrong",null);
+        var resumed=call("POST","/api/learning/consolidation/automatic",Map.of("requestId",requestId()),tokenA);
+        assertEquals(200,resumed.statusCode()); assertEquals(focus,data(resumed).get("batchId").asLong());
+        assertEquals(2,data(resumed).get("totalCount").asInt());
+        assertEquals(2,batchDetails(focus).stream().map(LearningBatchItem::getWordId).distinct().count());
+        assertEquals(409,call("POST","/api/learning/consolidation/automatic",Map.of("requestId",key),tokenB).statusCode());
+    }
+
+    @Test void automaticConsolidationDoesNotLimitTheWordCount() throws Exception {
+        var added=new ArrayList<Long>();
+        for(int i=0;i<101;i++) { long id=word(prefix+"_automatic_"+i); associate(systemBook,id,100+i); added.add(id); }
+        joinPlan(added.subList(0,100).toArray(Long[]::new)); joinPlan(added.get(100)); allocation(101,0);
+        long daily=startDay().get("batchId").asLong(); studyMode(daily,"DICTATION");
+        for(var item:batchDetails(daily)) {
+            var attempt=new WordTrainingAttempt(); attempt.setUserId(a); attempt.setWordId(item.getWordId());
+            attempt.setBatchId(daily); attempt.setBatchItemId(item.getId()); attempt.setRequestId(requestId());
+            attempt.setPresentationId(java.util.UUID.randomUUID().toString()); attempt.setModeVersion(1L); attempt.setMode("DICTATION");
+            attempt.setAction("ANSWER"); attempt.setInputText("wrong"); attempt.setVerdict("INCORRECT");
+            attempt.setHintUsed(false); attempt.setExtraTraining(false); attempt.setAttemptNo(1);
+            attempt.setLearningDate(statisticsDate()); attempt.setAnsweredAt(statisticsDate().atStartOfDay()); trainingAttempts.insertSelective(attempt);
+        }
+        var response=call("POST","/api/learning/consolidation/automatic",Map.of("requestId",requestId()),tokenA);
+        assertEquals(200,response.statusCode()); assertEquals(101,data(response).get("totalCount").asInt());
+    }
+
     @Test void expansionWrongReasonsShowActualSpellingAndIndependentCopyingCreatesNoIssue() throws Exception {
         followPlan(wordIds.get(1)); long follow=followCreate().get("batchId").asLong();
         followAnswer(follow,followNext(follow),"wrong"); followAnswer(follow,followNext(follow),spelling(1));

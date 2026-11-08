@@ -7,6 +7,8 @@ import com.wordtrail.learning.service.*;
 import com.wordtrail.learning.vo.*;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -17,6 +19,8 @@ public class ConsolidationController {
     private final DailyTrainingService training;
     @GetMapping("/issues") public ApiResponse<PageVO<ConsolidationIssueVO>> issues(@Valid @ModelAttribute ConsolidationQuery query) { return ApiResponse.ok(consolidation.issues(query)); }
     @GetMapping("/summary") public ApiResponse<List<ConsolidationMapper.ReasonCount>> summary() { return ApiResponse.ok(consolidation.summary()); }
+    public record AutomaticRequest(@NotBlank @Pattern(regexp="[A-Za-z0-9_-]{8,64}") String requestId) {}
+    @PostMapping("/automatic") public ApiResponse<DailyTaskVO> automatic(@Valid @RequestBody AutomaticRequest body) { return ApiResponse.ok(consolidation.automatic(body.requestId())); }
     @PostMapping("/batches") public ApiResponse<DailyTaskVO> create(@Valid @RequestBody CreateConsolidationRequest request) { return ApiResponse.ok(consolidation.create(request)); }
     @GetMapping("/batches") public ApiResponse<PageVO<DailyTaskVO>> history(@Valid @ModelAttribute BatchQuery query) { return ApiResponse.ok(consolidation.history(query)); }
     @GetMapping("/batches/{batchId}") public ApiResponse<DailyTaskVO> progress(@PathVariable @Positive long batchId) { return ApiResponse.ok(training.consolidationProgress(batchId)); }

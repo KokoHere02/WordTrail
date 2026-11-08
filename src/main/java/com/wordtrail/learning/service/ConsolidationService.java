@@ -79,6 +79,46 @@ public class ConsolidationService {
         if(items.insertBatch(entries)!=entries.size()) throw new IllegalStateException("Could not save consolidation word list");
         return daily.view(batch,context.entries(batch.getId()));
     }
+    /** Resume the current practice and include every newly outstanding word. */
+    @Transactional public DailyTaskVO automatic(String requestId) {
+        long userId=currentUser.id(); context.lockUser(userId);
+        var previous=batches.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId)).and(column("creation_request_id").eq(requestId)));
+        if(previous!=null) {
+            if(!"CONSOLIDATION".equals(previous.getPracticeMode()) || !"AUTO_CONSOLIDATION".equals(previous.getCreationFingerprint()))
+                throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
+            if(!"IN_PROGRESS".equals(previous.getStatus())) return daily.view(previous,context.entries(previous.getId()));
+        }
+        var active=previous!=null ? previous : batches.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId))
+            .and(column("practice_mode").eq("CONSOLIDATION")).and(column("status").eq("IN_PROGRESS"))
+            .orderBy(column("id").desc()).limit(1));
+        var candidates=issues.candidates(userId,"ERROR",null,null,Integer.MAX_VALUE);
+        if(candidates.isEmpty()) throw conflict("NO_CONSOLIDATION_WORDS","当前没有待巩固的错词");
+        var now=context.now();
+        if(active==null) {
+            active=new LearningBatch(); active.setUserId(userId); active.setTaskType("PRACTICE"); active.setPracticeMode("CONSOLIDATION");
+            active.setSelectionType("MANUAL"); active.setStudyMode(candidates.stream().anyMatch(v->v.translation()==null || v.translation().isBlank())?"LISTEN_DICTATION":"DICTATION");
+            active.setModeVersion(0L); active.setStatus("IN_PROGRESS"); active.setCreatedAt(now); active.setUpdatedAt(now);
+            active.setCreationRequestId(requestId); active.setCreationFingerprint("AUTO_CONSOLIDATION");
+            if(batches.insertSelective(active)!=1) throw new IllegalStateException("Could not prepare consolidation");
+        }
+        var existing=context.entries(active.getId());
+        var present=new HashSet<Long>(); existing.forEach(item->present.add(item.getWordId()));
+        int sort=existing.stream().mapToInt(LearningBatchItem::getSortOrder).max().orElse(0);
+        long queue=existing.stream().map(LearningBatchItem::getQueueOrder).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0);
+        var additions=new ArrayList<LearningBatchItem>();
+        for(var value:candidates) {
+            if(!present.add(value.wordId())) continue;
+            var item=new LearningBatchItem(); item.setBatchId(active.getId()); item.setWordId(value.wordId()); item.setSortOrder(++sort);
+            item.setQueueOrder(++queue); item.setItemType("REVIEW"); item.setLearningStatus("PENDING");
+            item.setAnswerCount(0); item.setRelearnCount(0); item.setReinforcementRemaining(0);
+            item.setStudyWord(value.word()); item.setStudyTranslation(Objects.requireNonNullElse(value.translation(),"")); additions.add(item);
+        }
+        for(int i=0;i<additions.size();i+=500) {
+            var part=additions.subList(i,Math.min(i+500,additions.size()));
+            if(items.insertBatch(part)!=part.size()) throw new IllegalStateException("Could not add consolidation words");
+        }
+        return daily.view(active,context.entries(active.getId()));
+    }
     @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
     public PageVO<DailyTaskVO> history(BatchQuery query) {
         var page=batches.paginate(query.getPage(),query.getSize(),QueryWrapper.create().where(column("user_id").eq(currentUser.id()))
