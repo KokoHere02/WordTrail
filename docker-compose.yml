@@ -22,10 +22,15 @@ services:
       MAIL_USERNAME: ${MAIL_USERNAME:-}
       MAIL_PASSWORD: ${MAIL_PASSWORD:-}
       MAIL_DAILY_LIMIT: ${MAIL_DAILY_LIMIT:-100}
+      PIPER_URL: ${PIPER_URL:-http://host.docker.internal:5000}
+      PIPER_US_VOICE: ${PIPER_US_VOICE:-en_US-lessac-medium}
+      PIPER_UK_VOICE: ${PIPER_UK_VOICE:-en_GB-alan-medium}
       SERVER_PORT: "8080"
       TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:${APP_PORT:-8081}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - database
     healthcheck:
