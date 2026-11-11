@@ -93,7 +93,7 @@ class LearningIntegrationTests {
         volatile String lastWord;
         volatile com.wordtrail.learning.dto.PronunciationRequest.Accent lastAccent;
         public byte[] audio(String word,com.wordtrail.learning.dto.PronunciationRequest.Accent accent) {
-            lastWord=word; lastAccent=accent; return "ID3-test-pronunciation".getBytes(StandardCharsets.UTF_8);
+            lastWord=word; lastAccent=accent; return "RIFFxxxxWAVEtest-pronunciation".getBytes(StandardCharsets.UTF_8);
         }
     }
     @Autowired private FixtureAudio audioFixture;
@@ -3441,7 +3441,7 @@ class LearningIntegrationTests {
         for(String field:List.of("word","wordId","phonetic","translation")) assertFalse(q.hasNonNull(field),field);
         assertFalse(q.get("hintUsed").asBoolean()); assertEquals(0.75,q.get("pronunciation").get("playbackRate").asDouble(),0.001);
         var sound=download(q.get("audioUrl").asText(),tokenA); assertEquals(200,sound.statusCode());
-        assertEquals("audio/mpeg",sound.headers().firstValue("Content-Type").orElse("")); assertEquals(spelling(1),audioFixture.lastWord);
+        assertEquals("audio/wav",sound.headers().firstValue("Content-Type").orElse("")); assertEquals(spelling(1),audioFixture.lastWord);
         assertEquals(com.wordtrail.learning.dto.PronunciationRequest.Accent.UK,audioFixture.lastAccent);
         assertEquals(404,download(q.get("audioUrl").asText(),tokenB).statusCode());
         var answer=train(batch,q,spelling(1),null); assertEquals("RECALLED",answer.get("completionReason").asText()); assertFalse(answer.get("hintUsed").asBoolean());

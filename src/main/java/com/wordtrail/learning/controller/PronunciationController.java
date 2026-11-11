@@ -13,8 +13,8 @@ public class PronunciationController {
     private final TrainingAudioService audio;
     private final DictationService dictation;
     private ResponseEntity<byte[]> response(byte[] bytes) {
-        return ResponseEntity.ok().contentType(MediaType.parseMediaType("audio/mpeg"))
-            .header(HttpHeaders.CACHE_CONTROL,"no-store").header(HttpHeaders.CONTENT_DISPOSITION,"inline; filename=pronunciation.mp3").body(bytes);
+        return ResponseEntity.ok().contentType(MediaType.parseMediaType("audio/wav"))
+            .header(HttpHeaders.CACHE_CONTROL,"no-store").header(HttpHeaders.CONTENT_DISPOSITION,"inline; filename=pronunciation.wav").body(bytes);
     }
     @GetMapping("/api/words/{wordId}/audio") public ResponseEntity<byte[]> word(@PathVariable @Positive long wordId,@RequestParam(required=false) Accent accent) {
         return response(audio.audio(audio.wordTarget(wordId),accent));
