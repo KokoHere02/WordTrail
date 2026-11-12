@@ -135,6 +135,15 @@ public class UserService {
         return issuePair(account,newSession(account,deviceName));
     }
     @Transactional
+    public void recoverPassword(String address, boolean email, String password) {
+        var query=QueryWrapper.create().where(column(email ? "email" : "phone").eq(address));
+        if(email) query.and(column("email_verified").eq(true));
+        var account=users.selectOneByQuery(query.forUpdate());
+        if(account==null) throw new BusinessException(HttpStatus.BAD_REQUEST,"RECOVERY_UNAVAILABLE","无法重置密码，请检查账户信息");
+        var patch=new UserAccount(); patch.setId(account.getId()); patch.setPasswordHash(passwords.hash(password));
+        patch.setAuthVersion(Math.addExact(account.getAuthVersion(),1)); requireWrite(users.update(patch)); revokeAll(account.getId(),null);
+    }
+    @Transactional
     public void bindEmail(String email,String password) {
         var account=lock(current.id()); requireIdentity(account);
         if(password!=null) requirePassword(password,account);

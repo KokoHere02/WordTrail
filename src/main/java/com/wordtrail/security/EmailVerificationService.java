@@ -45,7 +45,7 @@ public class EmailVerificationService {
     }
     public static String normalize(String email) { return email.strip().toLowerCase(java.util.Locale.ROOT); }
     public void send(String email,String purpose,Long owner,String session,String ip) {
-        if(!Set.of("REGISTER","LOGIN","BIND","PASSWORD","CHANGE_OLD","CHANGE_NEW").contains(purpose)) throw invalid();
+        if(!Set.of("REGISTER","LOGIN","RECOVERY","BIND","PASSWORD","CHANGE_OLD","CHANGE_NEW").contains(purpose)) throw invalid();
         gateway.validateConfiguration();
         Instant now=clock.instant().truncatedTo(ChronoUnit.MICROS);
         String id=UUID.randomUUID().toString(), code=testMode?"123456":String.format(java.util.Locale.ROOT,"%06d",random.nextInt(1000000));

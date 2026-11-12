@@ -69,6 +69,26 @@ class EmailAuthIntegrationTests {
         assertEquals(401,post("/password-login",body(addr,"\"password\":\"password123\""),null).statusCode());
         assertEquals(200,post("/password-login",body(addr,"\"password\":\"newpassword123\""),null).statusCode());
     }
+    @Test void recoveryResetsExistingAccountsAndRevokesSessions() throws Exception {
+        String address="recover-"+java.util.UUID.randomUUID()+"@example.com";
+        var account=users.registerEmail(address,"password123",null);
+        assertEquals(200,post("/send",body(address,"\"purpose\":\"RECOVERY\""),null).statusCode());
+        assertEquals(400,post("/code-login",body(address,"\"code\":\"123456\""),null).statusCode());
+        assertEquals(400,post("/recover",body(address,"\"code\":\"000000\",\"newPassword\":\"newpassword123\""),null).statusCode());
+        assertEquals(200,post("/recover",body(address,"\"code\":\"123456\",\"newPassword\":\"newpassword123\""),null).statusCode());
+        assertEquals(400,post("/recover",body(address,"\"code\":\"123456\",\"newPassword\":\"newpassword123\""),null).statusCode());
+        assertEquals(401,post("/password-login",body(address,"\"password\":\"password123\""),null).statusCode());
+        assertEquals(200,post("/password-login",body(address,"\"password\":\"newpassword123\""),null).statusCode());
+        assertEquals(401,requestTo("GET","/api/auth/me","",account.getAccessToken()).statusCode());
+        String phone="139"+String.format("%08d",new java.security.SecureRandom().nextInt(100000000));
+        var phoneAccount=users.registerPhone(phone,"password123",null);
+        String base="{\"phone\":\""+phone+"\",";
+        assertEquals(200,requestTo("POST","/api/auth/phone/send",base+"\"purpose\":\"RECOVERY\"}",null).statusCode());
+        assertEquals(200,requestTo("POST","/api/auth/phone/recover",base+"\"code\":\"123456\",\"newPassword\":\"newpassword123\"}",null).statusCode());
+        assertEquals(401,requestTo("GET","/api/auth/me","",phoneAccount.getAccessToken()).statusCode());
+        assertEquals(phoneAccount.getUser().id(),users.passwordPhone(phone,"newpassword123",null).getUser().id());
+        assertThrows(BusinessException.class,()->users.recoverPassword("13800000000",false,"newpassword123"));
+    }
     @Test void bindingRequiresBothEmailAndIdentityAndIsSessionBound() throws Exception {
         String addr="bind-"+java.util.UUID.randomUUID()+"@example.com";
         var first=users.registerPhone("139"+String.format("%08d",new java.security.SecureRandom().nextInt(100000000)),"password123",null);

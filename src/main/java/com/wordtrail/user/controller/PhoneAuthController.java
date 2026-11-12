@@ -19,7 +19,7 @@ public class PhoneAuthController {
     private final SmsVerificationService sms; private final UserService users; private final CurrentUser current;
     public PhoneAuthController(SmsVerificationService sms,UserService users,CurrentUser current){this.sms=sms;this.users=users;this.current=current;}
     public record Send(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone,
-                       @NotNull @Pattern(regexp="REGISTER|LOGIN") String purpose) {}
+                       @NotNull @Pattern(regexp="REGISTER|LOGIN|RECOVERY") String purpose) {}
     public record ProtectedSend(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone,
                        @NotNull @Pattern(regexp="PASSWORD|CHANGE_OLD|CHANGE_NEW|EMAIL_BIND") String purpose) {}
     public record Register(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone,
@@ -43,6 +43,10 @@ public class PhoneAuthController {
         if((!req.purpose().equals("CHANGE_NEW") && !phone.equals(req.phone())) || (req.purpose().equals("CHANGE_NEW") && phone.equals(req.phone())))
             throw new BusinessException(HttpStatus.BAD_REQUEST,"INVALID_PHONE","手机号不正确");
         sms.send(req.phone(),req.purpose(),current.id(),current.sessionId(),http.getRemoteAddr()); return ApiResponse.ok(null);
+    }
+    public record Recover(@NotNull @Pattern(regexp="1[3-9][0-9]{9}") String phone, @NotNull @Pattern(regexp="[0-9]{6}") String code, @NotNull @CodePointLength(min=8,max=64) String newPassword) {}
+    @PostMapping("/recover") public ApiResponse<Void> recover(@Valid @RequestBody Recover req) {
+        sms.verify(req.phone(),"RECOVERY",null,null,req.code()); users.recoverPassword(req.phone(),false,req.newPassword()); return ApiResponse.ok(null);
     }
     @PostMapping("/register") public ApiResponse<TokenVO> register(@Valid @RequestBody Register req) {
         sms.verify(req.phone(),"REGISTER",null,null,req.code()); return ApiResponse.ok(users.registerPhone(req.phone(),req.password(),req.deviceName()));

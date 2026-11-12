@@ -23,7 +23,7 @@ public class EmailAuthController {
     private final SmsVerificationService sms;
     public EmailAuthController(EmailVerificationService email,UserService users,CurrentUser current,SmsVerificationService sms) { this.email=email;this.users=users;this.current=current;this.sms=sms; }
     private static final String ADDRESS="[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\\.[A-Za-z]{2,}";
-    public record Send(@NotBlank @Size(max=254) @Email @Pattern(regexp=ADDRESS) String email,@NotNull @Pattern(regexp="REGISTER|LOGIN") String purpose) {}
+    public record Send(@NotBlank @Size(max=254) @Email @Pattern(regexp=ADDRESS) String email,@NotNull @Pattern(regexp="REGISTER|LOGIN|RECOVERY") String purpose) {}
     public record BindSend(@NotBlank @Size(max=254) @Email @Pattern(regexp=ADDRESS) String email) {}
     public record Register(@NotBlank @Size(max=254) @Email @Pattern(regexp=ADDRESS) String email,@NotNull @Pattern(regexp="[0-9]{6}") String code,@NotNull @CodePointLength(min=8,max=64) String password,@CodePointLength(max=100) String deviceName) {}
     public record CodeLogin(@NotBlank @Size(max=254) @Email @Pattern(regexp=ADDRESS) String email,@NotNull @Pattern(regexp="[0-9]{6}") String code,@CodePointLength(max=100) String deviceName) {}
@@ -49,6 +49,10 @@ public class EmailAuthController {
             if(oldEmail.equals(target)) throw new BusinessException(HttpStatus.CONFLICT,"EMAIL_UNCHANGED","新邮箱不能与原邮箱相同");
         }
         email.send(target,req.purpose(),current.id(),current.sessionId(),http.getRemoteAddr());return ApiResponse.ok(null);
+    }
+    public record Recover(@NotBlank @Size(max=254) @Email @Pattern(regexp=ADDRESS) String email, @NotNull @Pattern(regexp="[0-9]{6}") String code, @NotNull @CodePointLength(min=8,max=64) String newPassword) {}
+    @PostMapping("/recover") public ApiResponse<Void> recover(@Valid @RequestBody Recover req) {
+        String address=EmailVerificationService.normalize(req.email()); email.verify(address,"RECOVERY",null,null,req.code()); users.recoverPassword(address,true,req.newPassword()); return ApiResponse.ok(null);
     }
     @PostMapping("/register") public ApiResponse<TokenVO> register(@Valid @RequestBody Register req) {
         String address=EmailVerificationService.normalize(req.email());email.verify(address,"REGISTER",null,null,req.code());return ApiResponse.ok(users.registerEmail(address,req.password(),req.deviceName()));

@@ -21,7 +21,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class SmsVerificationService {
     private record Challenge(String purpose, Long ownerId, String sessionId, Instant expiresAt, int attempts, boolean consumed) {}
-    private static final Set<String> PURPOSES=Set.of("REGISTER","LOGIN","PASSWORD","CHANGE_OLD","CHANGE_NEW","EMAIL_BIND");
+    private static final Set<String> PURPOSES=Set.of("REGISTER","LOGIN","RECOVERY","PASSWORD","CHANGE_OLD","CHANGE_NEW","EMAIL_BIND");
     private final SqlSessionTemplate sqlSession; private final SmsGateway gateway; private final Clock clock;
     private final TransactionTemplate tx; private final int dailyLimit;
     public SmsVerificationService(SqlSessionTemplate sqlSession, SmsGateway gateway, Clock clock, PlatformTransactionManager manager,

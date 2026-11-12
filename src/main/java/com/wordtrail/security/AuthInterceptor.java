@@ -11,7 +11,7 @@ import org.springframework.web.servlet.AsyncHandlerInterceptor;
 @RequiredArgsConstructor
 public class AuthInterceptor implements AsyncHandlerInterceptor {
     private static final Set<String> PUBLIC_POSTS = Set.of(
-        "/api/auth/phone/send", "/api/auth/phone/register", "/api/auth/phone/password-login", "/api/auth/phone/code-login", "/api/auth/email/send", "/api/auth/email/register", "/api/auth/email/password-login", "/api/auth/email/code-login", "/api/auth/refresh", "/api/auth/logout");
+        "/api/auth/phone/recover", "/api/auth/email/recover", "/api/auth/phone/send", "/api/auth/phone/register", "/api/auth/phone/password-login", "/api/auth/phone/code-login", "/api/auth/email/send", "/api/auth/email/register", "/api/auth/email/password-login", "/api/auth/email/code-login", "/api/auth/refresh", "/api/auth/logout");
     private final JwtTokenService tokens;
     private final CurrentUser currentUser;
     private final AuthSessionGuard sessions;
