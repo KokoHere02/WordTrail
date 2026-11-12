@@ -13,6 +13,7 @@ public final class DictationPolicy {
         return new Outcome(reveal?"REVEALED":correct?"CORRECT":"INCORRECT",!correct,correct?1:0,
             correct?"RECALLED":"LIMIT_REACHED");
     }
+    public static String answerPattern(String target) { return target.replaceAll("[\\p{L}\\p{N}]", "_"); }
     public static String prompt(String translation,String target) {
         return Pattern.compile("(?<![\\p{IsLatin}\\p{N}_])"+Pattern.quote(target)+"(?![\\p{IsLatin}\\p{N}_])",
             Pattern.CASE_INSENSITIVE|Pattern.UNICODE_CASE).matcher(translation).replaceAll("[目标词]");

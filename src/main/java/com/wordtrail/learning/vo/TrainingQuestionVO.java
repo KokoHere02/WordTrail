@@ -6,6 +6,6 @@ import com.wordtrail.word.vo.TranslatedWord;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record TrainingQuestionVO(Long itemId, StudyMode mode, long modeVersion, String presentationId,
-        int attemptNo, Long wordId, String word, String phonetic, String translation,
+        int attemptNo, Long wordId, String word, String phonetic, String translation, String answerPattern,
         boolean hintUsed, boolean extraTraining, boolean answerRevealed, String phase,
         String itemStatus, String completionReason, DailyTaskVO progress,String audioUrl,PronunciationVO pronunciation) implements TranslatedWord {}

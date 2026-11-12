@@ -85,7 +85,7 @@ public class DailyTrainingService {
             +item.getStudyPresentationId()+"&modeVersion="+batch.getModeVersion();
         return new TrainingQuestionVO(id,mode,batch.getModeVersion(),item.getStudyPresentationId(),item.getStudyAttemptCount()+1,
             spellingVisible?item.getWordId():null,spellingVisible?item.getStudyWord():null,
-            spellingVisible?item.getStudyPhonetic():null,translation,item.getStudyHintUsed(),extra,revealed,phase,
+            spellingVisible?item.getStudyPhonetic():null,translation,practiceMode==null && mode.recallInput()?DictationPolicy.answerPattern(item.getStudyWord()):null,item.getStudyHintUsed(),extra,revealed,phase,
             item.getLearningStatus(),item.getCompletionReason(),daily.view(batch,entries),audioUrl,settings.pronunciation(userId));
     }
 

@@ -78,7 +78,7 @@ public class DictationService {
             item.setDictationPresentationId(UUID.randomUUID().toString()); save(item);
         }
         String prompt=DictationPolicy.prompt(item.getDictationTranslation(),item.getDictationTarget());
-        return new DictationQuestionVO(item.getId(),prompt,TranslationParser.parse(prompt),item.getDictationPresentationId(),
+        return new DictationQuestionVO(item.getId(),prompt,TranslationParser.parse(prompt),DictationPolicy.answerPattern(item.getDictationTarget()),item.getDictationPresentationId(),
             1,0,1,DictationPolicy.MAX_ATTEMPTS,"/api/dictation/batches/"+batchId+"/items/"+item.getId()+"/audio?presentationId="+item.getDictationPresentationId());
     }
 

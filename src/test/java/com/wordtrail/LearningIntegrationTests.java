@@ -2822,6 +2822,17 @@ class LearningIntegrationTests {
         assertEquals(0,statisticsDaily(statisticsDate()).get("completedCount").asInt());
     }
 
+    @Test void dailyDictationExposesOnlyMaskedAnswerFormatAcrossModesAndRefresh() throws Exception {
+        joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong();
+        for (String mode:List.of("DICTATION","LISTEN_DICTATION")) {
+            studyMode(batch,mode); var question=trainingQuestion(batch,null);
+            assertFalse(question.hasNonNull("word"));
+            assertEquals(com.wordtrail.learning.service.DictationPolicy.answerPattern(spelling(1)),question.get("answerPattern").asText());
+            assertEquals(question.get("answerPattern"),trainingQuestion(batch,null).get("answerPattern"));
+        }
+        studyMode(batch,"RECOGNITION"); assertFalse(trainingQuestion(batch,null).hasNonNull("answerPattern"));
+    }
+
     @Test void unifiedDictationWithMissingMeaningCanSwitchToListeningWithoutReplacingTheWord() throws Exception {
         dictionaryTranslation(wordIds.get(1),null); joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong();
         long item=itemId(batch); studyMode(batch,"DICTATION");
