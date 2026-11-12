@@ -379,6 +379,30 @@ class SentenceTranslationIntegrationTests {
         assertEquals(0,ok("GET",base+"/sentences?scope=learning&keyword="+query,null,tokenB,200).size());
     }
 
+    @Test void randomSentenceCandidatesRespectFiltersAndExcludeLearning() throws Exception {
+        String base="/api/sentence-practice";
+        long first=questionIds.get(0), second=questionIds.get(1);
+        var jdbc=new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        jdbc.update("INSERT INTO sentence_tag(category,name) VALUES (?,?)","句式",prefix+"random-tag");
+        long tag=jdbc.queryForObject("SELECT id FROM sentence_tag WHERE name=?",Long.class,prefix+"random-tag");
+        ok("PUT",base+"/sentences/"+first+"/tags",Map.of("tagIds",List.of(tag)),tokenA,200);
+        ok("PUT",base+"/sentences/"+second+"/tags",Map.of("tagIds",List.of(tag)),tokenA,200);
+        ok("PUT",base+"/sentences/"+second+"/favorite",Map.of("favorite",true),tokenA,200);
+        ok("PUT",base+"/learning/"+first,null,tokenA,200);
+        String filter="&tagId="+tag+"&keyword="+prefix;
+        var candidates=ok("GET",base+"/sentences/random?count=100&scope=bank"+filter,null,tokenA,200);
+        assertEquals(1,candidates.size()); assertEquals(second,candidates.get(0).get("id").asLong());
+        assertEquals(2,ok("GET",base+"/sentences/random?count=100&scope=bank"+filter,null,tokenB,200).size());
+        assertEquals(1,ok("GET",base+"/sentences/random?count=100&scope=favorites"+filter,null,tokenA,200).size());
+        assertEquals(0,ok("GET",base+"/sentences/random?count=100&scope=favorites"+filter,null,tokenB,200).size());
+        assertEquals(400,call("GET",base+"/sentences/random?count=101",null,tokenA).statusCode());
+        assertEquals(400,call("GET",base+"/sentences/random?scope=learning",null,tokenA).statusCode());
+        assertEquals(404,call("POST",base+"/learning/batch",Map.of("sentenceIds",List.of(second,questionIds.get(3))),tokenA).statusCode());
+        assertEquals(1,ok("GET",base+"/sentences/random?count=100&scope=bank"+filter,null,tokenA,200).size());
+        assertEquals(1,ok("POST",base+"/learning/batch",Map.of("sentenceIds",List.of(first,second,second)),tokenA,200).asInt());
+        assertEquals(0,ok("POST",base+"/learning/batch",Map.of("sentenceIds",List.of(second)),tokenA,200).asInt());
+    }
+
     @Test void learningListAndHistoryAreIndependentFromFavoritesAndRetries() throws Exception {
         String base="/api/sentence-practice";long sentence=questionIds.get(0);
         var jdbc=new org.springframework.jdbc.core.JdbcTemplate(dataSource);

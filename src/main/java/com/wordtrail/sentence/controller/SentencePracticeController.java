@@ -34,6 +34,7 @@ public class SentencePracticeController {
     private final SentenceFavoriteService favorites;
     public record Submit(@NotBlank @Size(max=2000) String translation, @NotBlank @Size(max=64) @Pattern(regexp="[A-Za-z0-9_-]+") String requestId) {}
     public record Tags(@NotNull @Size(max=30) List<@NotNull @Positive Long> tagIds) {}
+    public record LearningSelection(@NotEmpty @Size(max=100) List<@NotNull @Positive Long> sentenceIds) {}
     public record Sentence(long id,String englishText,String referenceTranslation,String explanation,String source,String sourceReference,boolean learning,boolean favorite,boolean available) {}
     public record Tag(long id,String category,String name) {}
     public record SentenceWithTags(long id,String englishText,String referenceTranslation,String explanation,String source,String sourceReference,boolean learning,boolean favorite,boolean available,List<Tag> tags) {}
@@ -93,6 +94,18 @@ public class SentencePracticeController {
         },ids.toArray());
         return ApiResponse.ok(sentences.stream().map(s -> new SentenceWithTags(s.id(),s.englishText(),s.referenceTranslation(),s.explanation(),s.source(),s.sourceReference(),s.learning(),s.favorite(),s.available(),tagsBySentence.getOrDefault(s.id(),List.of()))).toList());
     }
+    @GetMapping("/sentences/random") public ApiResponse<List<Sentence>> randomCandidates(@RequestParam(defaultValue="100") int count,@RequestParam(defaultValue="bank") String scope,@RequestParam(required=false) Long tagId,@RequestParam(required=false) Long wordId,@RequestParam(required=false) String keyword){
+        if(count<1 || count>100 || !Set.of("bank","favorites").contains(scope) || (tagId!=null && tagId<=0) || (wordId!=null && wordId<=0) || (keyword!=null && keyword.length()>100)) throw error(HttpStatus.BAD_REQUEST,"INVALID_PARAMETER","筛选或数量参数无效");
+        long uid=user.id();
+        String sql="SELECT q.id,q.english_text,q.reference_translation,q.explanation,q.source,q.source_reference, EXISTS(SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id) FROM sentence_question q WHERE q.status='ACTIVE' AND NOT EXISTS (SELECT 1 FROM user_sentence_learning l WHERE l.user_id=? AND l.sentence_id=q.id)";
+        var args=new ArrayList<Object>(); args.add(uid); args.add(uid);
+        if(scope.equals("favorites")){sql+=" AND EXISTS (SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id)";args.add(uid);}
+        if(tagId!=null){sql+=" AND EXISTS (SELECT 1 FROM sentence_tag_relation t WHERE t.sentence_id=q.id AND t.tag_id=?)";args.add(tagId);}
+        if(wordId!=null){sql+=" AND EXISTS (SELECT 1 FROM sentence_word w WHERE w.sentence_id=q.id AND w.word_id=?)";args.add(wordId);}
+        if(keyword!=null && !keyword.isBlank()){sql+=" AND (LOCATE(LOWER(?),LOWER(q.english_text))>0 OR LOCATE(LOWER(?),LOWER(q.reference_translation))>0)";args.add(keyword.strip());args.add(keyword.strip());}
+        args.add(count); sql+=" ORDER BY RAND() LIMIT ?";
+        return ApiResponse.ok(db.query(sql,(r,n)->new Sentence(r.getLong(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5),r.getString(6),false,r.getBoolean(7),true),args.toArray()));
+    }
     @GetMapping("/learning/random") public ApiResponse<List<Sentence>> random(@RequestParam(defaultValue="10") int count,@RequestParam(required=false) Long tagId,@RequestParam(required=false) List<Long> tagIds,@RequestParam(required=false) Long wordId){
         if(count<1 || count>50)throw error(HttpStatus.BAD_REQUEST,"INVALID_COUNT","数量应为 1 至 50");
         String sql="SELECT q.id,q.english_text,q.reference_translation,q.explanation,q.source,q.source_reference, EXISTS(SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id) FROM sentence_question q JOIN user_sentence_learning l ON l.sentence_id=q.id WHERE l.user_id=? AND q.status='ACTIVE'";
@@ -105,6 +118,14 @@ public class SentencePracticeController {
     }
     @GetMapping("/sentences/{id}/tags") public ApiResponse<List<Tag>> sentenceTags(@PathVariable long id){existing(id);return ApiResponse.ok(db.query("SELECT t.id,t.category,t.name FROM sentence_tag t JOIN sentence_tag_relation r ON r.tag_id=t.id WHERE r.sentence_id=? ORDER BY t.id",(r,n)->new Tag(r.getLong(1),r.getString(2),r.getString(3)),id));}
     @PutMapping("/sentences/{id}/tags") @Transactional public ApiResponse<Void> setTags(@PathVariable long id,@Valid @RequestBody Tags body){editor.require();context.lockUser(user.id());var db=transactionDb();existing(id);var ids=new LinkedHashSet<>(body.tagIds());for(long tag:ids) if(db.queryForObject("SELECT COUNT(*) FROM sentence_tag WHERE id=?",Long.class,tag)==0)throw error(HttpStatus.BAD_REQUEST,"INVALID_TAG","标签不存在");db.update("DELETE FROM sentence_tag_relation WHERE sentence_id=?",id);for(long tag:ids)db.update("INSERT INTO sentence_tag_relation(sentence_id,tag_id) VALUES (?,?)",id,tag);return ApiResponse.ok(null);}
+    @PostMapping("/learning/batch") @Transactional public ApiResponse<Integer> addBatch(@Valid @RequestBody LearningSelection body){
+        long uid=user.id(); context.lockUser(uid); var db=transactionDb(); int added=0;
+        for(long id:new LinkedHashSet<>(body.sentenceIds())){
+            if(db.queryForObject("SELECT COUNT(*) FROM sentence_question WHERE id=? AND status='ACTIVE'",Long.class,id)==0) throw error(HttpStatus.NOT_FOUND,"SENTENCE_NOT_FOUND","句子不存在或已停用");
+            if(db.queryForObject("SELECT COUNT(*) FROM user_sentence_learning WHERE user_id=? AND sentence_id=?",Long.class,uid,id)==0){db.update("INSERT INTO user_sentence_learning(user_id,sentence_id,added_at) VALUES (?,?,?)",uid,id,context.now()); added++;}
+        }
+        return ApiResponse.ok(added);
+    }
     @PutMapping("/learning/{id}") @Transactional public ApiResponse<Void> add(@PathVariable long id){context.lockUser(user.id());var db=transactionDb();if(db.queryForObject("SELECT COUNT(*) FROM sentence_question WHERE id=? AND status='ACTIVE'",Long.class,id)==0)throw error(HttpStatus.NOT_FOUND,"SENTENCE_NOT_FOUND","句子不存在或已停用");if(db.queryForObject("SELECT COUNT(*) FROM user_sentence_learning WHERE user_id=? AND sentence_id=?",Long.class,user.id(),id)==0)db.update("INSERT INTO user_sentence_learning(user_id,sentence_id,added_at) VALUES (?,?,?)",user.id(),id,context.now());return ApiResponse.ok(null);}
     @DeleteMapping("/learning/{id}") @Transactional public ApiResponse<Void> remove(@PathVariable long id){context.lockUser(user.id());var db=transactionDb();db.update("DELETE FROM user_sentence_learning WHERE user_id=? AND sentence_id=?",user.id(),id);return ApiResponse.ok(null);}
     @PostMapping("/sentences/{id}/translations") @Transactional public ApiResponse<Result> submit(@PathVariable long id,@Valid @RequestBody Submit body){
