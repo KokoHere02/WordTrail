@@ -87,6 +87,22 @@ CREATE TABLE `word_form` (
   CONSTRAINT `chk_word_form_type` CHECK (`form_type` IN ('PAST','PAST_PARTICIPLE','PRESENT_PARTICIPLE','THIRD_PERSON_SINGULAR','PLURAL','COMPARATIVE','SUPERLATIVE'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE `word_confusable_pair` (
+  `word_id_a` bigint unsigned NOT NULL,
+  `word_id_b` bigint unsigned NOT NULL,
+  `source` varchar(64) NOT NULL,
+  `similarity_score` decimal(10,8) NOT NULL,
+  `status` varchar(16) NOT NULL DEFAULT 'ACTIVE',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`word_id_a`, `word_id_b`),
+  KEY `idx_confusable_b` (`word_id_b`, `word_id_a`),
+  CONSTRAINT `fk_confusable_a` FOREIGN KEY (`word_id_a`) REFERENCES `word` (`id`),
+  CONSTRAINT `fk_confusable_b` FOREIGN KEY (`word_id_b`) REFERENCES `word` (`id`),
+  CONSTRAINT `chk_confusable_order` CHECK (`word_id_a` < `word_id_b`),
+  CONSTRAINT `chk_confusable_score` CHECK (`similarity_score` BETWEEN 0 AND 1),
+  CONSTRAINT `chk_confusable_status` CHECK (`status` IN ('ACTIVE','INACTIVE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE `word_book` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '词书ID',
   `name` varchar(128) NOT NULL COMMENT '词书名称',

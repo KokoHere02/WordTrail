@@ -26,6 +26,17 @@ public class WordController {
     public record WordForm(String form, String formType) {}
     public record LookupWord(long id, String word, String phonetic, String translation) {}
 
+    @GetMapping("/{wordId}/confusables")
+    public ApiResponse<List<LookupWord>> confusables(@PathVariable @Positive long wordId) {
+        return ApiResponse.ok(db.query("""
+            SELECT w.id,w.word,w.phonetic,w.translation FROM word_confusable_pair p
+            JOIN word w ON w.id = CASE WHEN p.word_id_a = ? THEN p.word_id_b ELSE p.word_id_a END
+            WHERE (p.word_id_a = ? OR p.word_id_b = ?) AND p.status = 'ACTIVE'
+            ORDER BY p.similarity_score DESC, w.word, w.id LIMIT 8
+            """, (row, index) -> new LookupWord(row.getLong(1), row.getString(2), row.getString(3), row.getString(4)),
+            wordId, wordId, wordId));
+    }
+
     @GetMapping("/lookup")
     public ApiResponse<List<LookupWord>> lookup(@RequestParam @NotBlank @Size(max = 255) String term) {
         String spelling = term.strip().replace('’', '\'');

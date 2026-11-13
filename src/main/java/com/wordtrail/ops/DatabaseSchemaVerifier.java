@@ -41,6 +41,6 @@ public class DatabaseSchemaVerifier implements SmartInitializingSingleton {
             throw new IllegalStateException("数据库结构检查失败；SQLState="+ex.getSQLState()+"，错误码="+ex.getErrorCode());
         }
         if(!missing.isEmpty()) throw new IllegalStateException("数据库结构未就绪，缺少："+String.join("、",missing)
-            +"。请检查增量迁移 016 至 019 和邮箱认证数据库结构；不要重跑已完成的迁移。应用停止启动。");
+            +"。请检查增量迁移 016 至 019、邮箱认证及形近词数据库结构；不要重跑已完成的迁移。应用停止启动。");
     }
 }
