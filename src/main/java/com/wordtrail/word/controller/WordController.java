@@ -26,6 +26,20 @@ public class WordController {
     public record WordForm(String form, String formType) {}
     public record LookupWord(long id, String word, String phonetic, String translation) {}
 
+    @GetMapping("/{wordId}/related")
+    public ApiResponse<List<LookupWord>> related(@PathVariable @Positive long wordId) {
+        return ApiResponse.ok(db.query("""
+            SELECT w.id,w.word,w.phonetic,w.translation, MIN(member.sort_order) AS display_order
+            FROM word_family_word current_word
+            JOIN word_family family ON family.id=current_word.family_id AND family.status='ACTIVE'
+            JOIN word_family_word member ON member.family_id=family.id AND member.status='ACTIVE'
+            JOIN word w ON w.id=member.word_id
+            WHERE current_word.word_id=? AND current_word.status='ACTIVE' AND member.word_id<>?
+            GROUP BY w.id,w.word,w.phonetic,w.translation
+            ORDER BY display_order,w.word,w.id LIMIT 50
+            """, (row, index) -> new LookupWord(row.getLong(1), row.getString(2), row.getString(3), row.getString(4)), wordId, wordId));
+    }
+
     @GetMapping("/{wordId}/confusables")
     public ApiResponse<List<LookupWord>> confusables(@PathVariable @Positive long wordId) {
         return ApiResponse.ok(db.query("""

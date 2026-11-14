@@ -87,6 +87,34 @@ CREATE TABLE `word_form` (
   CONSTRAINT `chk_word_form_type` CHECK (`form_type` IN ('PAST','PAST_PARTICIPLE','PRESENT_PARTICIPLE','THIRD_PERSON_SINGULAR','PLURAL','COMPARATIVE','SUPERLATIVE'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE `word_family` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) DEFAULT NULL,
+  `source` varchar(64) NOT NULL,
+  `status` varchar(16) NOT NULL DEFAULT 'PENDING',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_word_family_source_name` (`source`, `name`),
+  CONSTRAINT `chk_word_family_status` CHECK (`status` IN ('PENDING','ACTIVE','DISABLED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `word_family_word` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `family_id` bigint unsigned NOT NULL,
+  `word_id` bigint unsigned NOT NULL,
+  `sort_order` int NOT NULL DEFAULT 0,
+  `status` varchar(16) NOT NULL DEFAULT 'ACTIVE',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_word_family_word` (`family_id`, `word_id`),
+  KEY `idx_word_family_word_word` (`word_id`, `family_id`),
+  CONSTRAINT `fk_word_family_word_family` FOREIGN KEY (`family_id`) REFERENCES `word_family` (`id`),
+  CONSTRAINT `fk_word_family_word_word` FOREIGN KEY (`word_id`) REFERENCES `word` (`id`),
+  CONSTRAINT `chk_word_family_word_status` CHECK (`status` IN ('ACTIVE','DISABLED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE `word_confusable_pair` (
   `word_id_a` bigint unsigned NOT NULL,
   `word_id_b` bigint unsigned NOT NULL,
