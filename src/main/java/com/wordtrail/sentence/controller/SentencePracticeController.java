@@ -72,8 +72,8 @@ public class SentencePracticeController {
 
     @GetMapping("/tags") public ApiResponse<List<Tag>> tags(){return ApiResponse.ok(db.query("SELECT id,category,name FROM sentence_tag ORDER BY id",(r,n)->new Tag(r.getLong(1),r.getString(2),r.getString(3))));}
     @PutMapping("/sentences/{id}/favorite") public ApiResponse<Favorite> favorite(@PathVariable @Positive long id,@Valid @RequestBody SentenceFavoriteRequest request){return ApiResponse.ok(favorites.set(id,request.favorite()));}
-    @GetMapping("/sentences") public ApiResponse<List<SentenceWithTags>> list(@RequestParam(defaultValue="bank") String scope,@RequestParam(required=false) Long tagId,@RequestParam(required=false) List<Long> tagIds,@RequestParam(required=false) Long wordId,@RequestParam(required=false) String keyword,@RequestParam(defaultValue="0") @Min(0) int offset,@RequestParam(defaultValue="50") @Min(1) @Max(100) int limit){
-        if(offset<0 || limit<1 || limit>100 || (tagId!=null && tagId<=0) || (wordId!=null && wordId<=0)) throw error(HttpStatus.BAD_REQUEST,"INVALID_PARAMETER","筛选或分页参数无效");
+    @GetMapping("/sentences") public ApiResponse<List<SentenceWithTags>> list(@RequestParam(defaultValue="bank") String scope,@RequestParam(required=false) Long tagId,@RequestParam(required=false) List<Long> tagIds,@RequestParam(required=false) Long wordId,@RequestParam(required=false) String keyword,@RequestParam(required=false) Integer maxEnglishLength,@RequestParam(defaultValue="0") @Min(0) int offset,@RequestParam(defaultValue="50") @Min(1) @Max(100) int limit){
+        if(offset<0 || limit<1 || limit>100 || (tagId!=null && tagId<=0) || (wordId!=null && wordId<=0) || (maxEnglishLength!=null && maxEnglishLength<1)) throw error(HttpStatus.BAD_REQUEST,"INVALID_PARAMETER","筛选或分页参数无效");
         if(keyword!=null && keyword.length()>100) throw error(HttpStatus.BAD_REQUEST,"INVALID_PARAMETER","搜索内容不能超过 100 个字符");
         if(!Set.of("bank","learning","favorites").contains(scope)) throw error(HttpStatus.BAD_REQUEST,"INVALID_SCOPE","无效的范围");
         String filter=switch(scope){case "learning" -> " AND EXISTS (SELECT 1 FROM user_sentence_learning l WHERE l.user_id=? AND l.sentence_id=q.id)";case "favorites" -> " AND EXISTS (SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id)";default -> "";};
@@ -81,6 +81,7 @@ public class SentencePracticeController {
         if(tagId!=null){filter+=" AND EXISTS (SELECT 1 FROM sentence_tag_relation t WHERE t.sentence_id=q.id AND t.tag_id=?)";args.add(tagId);}
         filter+=tagFilters(tagIds,args);
         if(wordId!=null){filter+=" AND EXISTS (SELECT 1 FROM sentence_word w WHERE w.sentence_id=q.id AND w.word_id=?)";args.add(wordId);}
+        if(maxEnglishLength!=null){filter+=" AND CHAR_LENGTH(q.english_text)<=?";args.add(maxEnglishLength);}
         if(keyword!=null && !keyword.isBlank()){filter+=" AND (LOCATE(LOWER(?),LOWER(q.english_text))>0 OR LOCATE(LOWER(?),LOWER(q.reference_translation))>0)";args.add(keyword.strip());args.add(keyword.strip());}
         args.add(limit);args.add(offset);
         String sql="SELECT q.id,q.english_text,q.reference_translation,q.explanation,q.source,q.source_reference, EXISTS(SELECT 1 FROM user_sentence_learning l WHERE l.user_id=? AND l.sentence_id=q.id), EXISTS(SELECT 1 FROM user_sentence_favorite f WHERE f.user_id=? AND f.sentence_id=q.id), q.status FROM sentence_question q WHERE 1=1"+(scope.equals("bank")?" AND q.status='ACTIVE'":"")+filter+" ORDER BY q.id DESC LIMIT ? OFFSET ?";
