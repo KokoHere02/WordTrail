@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class LearningRecordsService {
     private final CurrentUser currentUser;
     private final LearningContext context;
+    private final DictationService dictation;
     private final NamedParameterJdbcTemplate jdbc;
 
     // Each branch is scoped to the authenticated user before being combined. Creation time
@@ -58,8 +59,9 @@ public class LearningRecordsService {
             String source, Long bookId, Boolean singleAttempt) {}
     private record Counts(long total, long done, long skipped, long fresh, long review) {}
 
-    @Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
+    @Transactional(isolation=Isolation.REPEATABLE_READ)
     public PageVO<LearningRecordVO> list(LearningRecordQuery query) {
+        dictation.reconcileCurrentUser();
         var parameters = new MapSqlParameterSource()
             .addValue("userId", currentUser.id()).addValue("today", context.today())
             .addValue("type", query.getType().name()).addValue("status", query.getStatus().name())

@@ -19,6 +19,8 @@ public class DictationController {
     public ApiResponse<PageVO<DictationTaskVO>> list(@Valid @ModelAttribute BatchQuery query) { return ApiResponse.ok(dictation.list(query)); }
     @GetMapping("/batches/{batchId}")
     public ApiResponse<DictationTaskVO> progress(@PathVariable @Positive long batchId) { return ApiResponse.ok(dictation.progress(batchId)); }
+    @PostMapping("/batches/{batchId}/abandon")
+    public ApiResponse<DictationTaskVO> abandon(@PathVariable @Positive long batchId) { return ApiResponse.ok(dictation.abandon(batchId)); }
     @PostMapping("/batches/{batchId}/next")
     public ApiResponse<DictationQuestionVO> next(@PathVariable @Positive long batchId,@RequestBody(required=false) EmptyRequest request) { return ApiResponse.ok(dictation.next(batchId)); }
     @PutMapping("/batches/{batchId}/items/{itemId}/answer")

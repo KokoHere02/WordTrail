@@ -3536,6 +3536,25 @@ class LearningIntegrationTests {
     }
     private JsonNode dictate(long batch,String input) throws Exception {return dictate(batch,dictationNext(batch),input,requestId());}
 
+    @Test void timedDictationCanResumeAbandonAndExpireWithoutAcceptingLateAnswers() throws Exception {
+        long first=createDictation(Map.of("count",1)).get("batchId").asLong();
+        var question=dictationNext(first);
+        assertEquals(3600,get(dictationPath(first),tokenA).get("remainingSeconds").asLong());
+        assertEquals(409,call("POST","/api/dictation/batches",Map.of("count",1),tokenA).statusCode());
+        assertEquals(question,dictationNext(first));
+        assertEquals("ABANDONED",data(call("POST",dictationPath(first)+"/abandon",null,tokenA)).get("status").asText());
+        long second=createDictation(Map.of("count",1)).get("batchId").asLong();
+        var late=dictationNext(second);
+        clock.advanceSeconds(3600); tokenA=jwt.issue(a);
+        assertEquals(409,call("PUT",dictationPath(second)+"/items/"+late.get("itemId").asLong()+"/answer",dictationBody(late,spelling(0),requestId()),tokenA).statusCode());
+        var expired=get(dictationPath(second),tokenA);
+        assertEquals("COMPLETED",expired.get("status").asText()); assertEquals(0,expired.get("completedCount").asInt());
+        assertEquals(1,expired.get("needsPracticeCount").asInt());
+        var word=get(dictationPath(second)+"/result/words",tokenA).get("records").get(0);
+        assertTrue(word.get("lastVerdict").isNull()); assertTrue(word.get("answeredAt").isNull());
+        assertEquals(201,call("POST","/api/dictation/batches",Map.of("count",1),tokenA).statusCode());
+    }
+
     @Test void dictationDefaultSelectionRequiresActiveStartedPlansAndKeepsWordIdentityAcrossBooks() throws Exception {
         joinPlan(wordIds.get(1));
         long batch=createDictation(Map.of("count",100)).get("batchId").asLong();
@@ -3543,11 +3562,13 @@ class LearningIntegrationTests {
         assertEquals("DICTATION",batches.selectOneById(batch).getPracticeMode()); assertNull(batchDetails(batch).get(0).getResult());
         assertEquals(409,call("POST","/api/dictation/batches",Map.of("wordIds",List.of(wordIds.get(1))),tokenA).statusCode());
         personalBookWords("POST",emptyBook,wordIds.get(0));
+        assertEquals("ABANDONED",data(call("POST",dictationPath(batch)+"/abandon",null,tokenA)).get("status").asText());
         long second=createDictation(Map.of("bookId",emptyBook,"wordIds",List.of(wordIds.get(0),wordIds.get(0)))).get("batchId").asLong();
         assertEquals(1,batchDetails(second).size());
+        call("POST",dictationPath(second)+"/abandon",null,tokenA);
         planManagementStatus("PAUSED",wordIds.get(0));
         assertEquals(409,call("POST","/api/dictation/batches",Map.of(),tokenA).statusCode());
-        assertEquals("IN_PROGRESS",get(dictationPath(batch),tokenA).get("status").asText());
+        assertEquals("ABANDONED",get(dictationPath(batch),tokenA).get("status").asText());
     }
 
     @Test void dictationQuestionMasksTargetAndDoesNotRevealEnglishOrPhoneticUntilSubmitting() throws Exception {
@@ -3654,14 +3675,26 @@ class LearningIntegrationTests {
         assertEquals(1,dictationLogs.selectCountByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))));
     }
 
-    @Test void dictationUsesSnapshotsAndContinuesAcrossDaysWithoutMovingDailySchedules() throws Exception {
+    @Test void existingDictationUsesSnapshotsWithinDeadlineWithoutMovingDailySchedules() throws Exception {
         long batch=createDictation(Map.of()).get("batchId").asLong(); var question=dictationNext(batch); String original=spelling(0),memory=stateSnapshot();
+        var legacy=batches.selectOneById(batch); legacy.setModeVersion(0L); batches.update(legacy);
         var word=words.selectOneById(wordIds.get(0)); word.setWord(prefix+"changed"); word.setTranslation("修改后的释义"); words.update(word);
-        advanceDays(2); var answer=dictate(batch,question,original,requestId());
+        clock.advanceSeconds(1800); tokenA=jwt.issue(a); assertEquals(1800,get(dictationPath(batch),tokenA).get("remainingSeconds").asLong());
+        var answer=dictate(batch,question,original,requestId());
         assertEquals("CORRECT",answer.get("verdict").asText()); assertEquals(original,answer.get("expectedWord").asText());
         assertEquals("测试",answer.get("translation").asText()); assertEquals(memory,stateSnapshot());
         var history=get("/api/dictation/words/"+wordIds.get(0)+"/history",tokenA).get("records").get(0);
         assertEquals(statisticsDate().toString(),history.get("learningDate").asText());
+    }
+
+    @Test void existingInProgressDictationExpiresFromItsOriginalCreationTime() throws Exception {
+        long batch=createDictation(Map.of()).get("batchId").asLong();
+        var previous=batches.selectOneById(batch); previous.setModeVersion(0L); batches.update(previous);
+        clock.advanceSeconds(3600); tokenA=jwt.issue(a);
+        var expired=get(dictationPath(batch),tokenA);
+        assertEquals("COMPLETED",expired.get("status").asText());
+        assertEquals(1,expired.get("needsPracticeCount").asInt());
+        assertNotNull(expired.get("deadlineAt"));
     }
 
     @Test void dictationIsExcludedFromRecognitionListsWeakWordsHistoriesAndAllOldStatistics() throws Exception {
