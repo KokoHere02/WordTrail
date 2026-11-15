@@ -108,10 +108,10 @@ public class DailyTrainingService {
                     || !Objects.equals(previous.getAttemptNo(),request.attemptNo())
                     || !previous.getAction().equals(request.action().name())
                     || !Objects.equals(previous.getInputText(),request.input())
-                    || !Objects.equals(previous.getSelfAssessment(),request.result())) throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
+                    || !Objects.equals(previous.getSelfAssessment(),request.result())) throw conflict("REQUEST_ID_REUSED","提交结果存在冲突，请核对记录");
             return response(previous,item,progress(batchId,practiceMode));
         }
-        if(events.findRequest(userId,request.requestId())!=null) throw conflict("REQUEST_ID_REUSED","请求标识已用于其他作答");
+        if(events.findRequest(userId,request.requestId())!=null) throw conflict("REQUEST_ID_REUSED","提交结果存在冲突，请核对记录");
         if(practiceMode==null && "FOLLOW_TYPING".equals(batch.getStudyMode())) throw independentFollowTyping();
         if(practiceMode==null || "FOLLOW_TYPING".equals(practiceMode)) daily.availableState(userId,item);
         if(!batch.getModeVersion().equals(request.modeVersion()) || !Objects.equals(item.getStudyPresentationVersion(),request.modeVersion())
@@ -260,7 +260,7 @@ public class DailyTrainingService {
         if(practiceMode==null) return daily.daily(userId,batchId,lock,date);
         var batch=context.ownedBatch(userId,batchId,lock);
         if(!"PRACTICE".equals(batch.getTaskType()) || !practiceMode.equals(batch.getPracticeMode()))
-            throw conflict("FOLLOW_TYPING".equals(practiceMode)?"NOT_FOLLOW_TYPING_TASK":"NOT_CONSOLIDATION_TASK","请使用该任务原有接口");
+            throw conflict("FOLLOW_TYPING".equals(practiceMode)?"NOT_FOLLOW_TYPING_TASK":"NOT_CONSOLIDATION_TASK","请返回对应的练习");
         if("ABANDONED".equals(batch.getStatus()) && (lock || !"FOLLOW_TYPING".equals(practiceMode))) throw conflict("BATCH_ABANDONED","该练习已放弃");
         if(lock && "FOLLOW_TYPING".equals(practiceMode)) skipUnavailableFollowWords(userId,batch);
         return batch;

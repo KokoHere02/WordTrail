@@ -133,7 +133,7 @@ public class SentencePracticeController {
         context.lockUser(user.id());
         var db=transactionDb();
         var previous=db.query("SELECT sentence_id,translation FROM sentence_translation_record WHERE user_id=? AND request_id=?",(r,n)->Map.entry(r.getLong(1),r.getString(2)),user.id(),body.requestId());
-        if(!previous.isEmpty()){var p=previous.get(0);if(p.getKey()!=id || !p.getValue().equals(body.translation()))throw error(HttpStatus.CONFLICT,"REQUEST_ID_REUSED","请求标识已用于其他译文");return ApiResponse.ok(result(id));}
+        if(!previous.isEmpty()){var p=previous.get(0);if(p.getKey()!=id || !p.getValue().equals(body.translation()))throw error(HttpStatus.CONFLICT,"REQUEST_ID_REUSED","提交结果存在冲突，请核对记录");return ApiResponse.ok(result(id));}
         if(db.queryForObject("SELECT COUNT(*) FROM user_sentence_learning l JOIN sentence_question q ON q.id=l.sentence_id WHERE l.user_id=? AND l.sentence_id=? AND q.status='ACTIVE'",Long.class,user.id(),id)==0)throw error(HttpStatus.CONFLICT,"SENTENCE_NOT_IN_LEARNING","句子不在学习列表或已停用");
         db.update("INSERT INTO sentence_translation_record(user_id,sentence_id,translation,request_id,created_at) VALUES (?,?,?,?,?)",user.id(),id,body.translation(),body.requestId(),context.now());
         db.update("DELETE FROM user_sentence_learning WHERE user_id=? AND sentence_id=?",user.id(),id);return ApiResponse.ok(result(id));

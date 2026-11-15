@@ -37,7 +37,7 @@ public class FollowTypingService {
             .and(column("creation_request_id").eq(request.getRequestId())));
         if(previous!=null) {
             if(!"FOLLOW_TYPING".equals(previous.getPracticeMode()) || !fingerprint.equals(previous.getCreationFingerprint()))
-                throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
+                throw conflict("REQUEST_ID_REUSED","提交结果存在冲突，请核对记录");
             return daily.view(previous,context.entries(previous.getId()));
         }
         if(batches.selectCountByQuery(QueryWrapper.create().where(column("user_id").eq(userId))

@@ -169,7 +169,7 @@ public class DailyLearningService {
 
     LearningBatch daily(long userId, long batchId, boolean lock, LocalDate writingDate) {
         var batch=context.ownedBatch(userId,batchId,lock);
-        if(!"DAILY".equals(batch.getTaskType())) { throw conflict("NOT_DAILY_TASK", "请使用专项练习接口"); }
+        if(!"DAILY".equals(batch.getTaskType())) { throw conflict("NOT_DAILY_TASK", "请返回专项练习"); }
         if(writingDate!=null && !writingDate.equals(batch.getLearningDate())) { throw conflict("DAILY_TASK_EXPIRED", "历史每日任务只读，请进入今日学习"); }
         if("ABANDONED".equals(batch.getStatus())) { throw conflict("BATCH_ABANDONED", "该学习批次已放弃"); }
         return batch;
@@ -184,7 +184,7 @@ public class DailyLearningService {
     @Transactional(readOnly=true, isolation=Isolation.REPEATABLE_READ)
     public DailyItemVO item(long batchId,long itemId) {
         long userId=currentUser.id(); var today=context.today(); var batch=daily(userId,batchId,false,null);
-        if(!"RECOGNITION".equals(batch.getStudyMode())) throw conflict("TRAINING_ENDPOINT_REQUIRED", "当前模式请使用统一训练接口");
+        if(!"RECOGNITION".equals(batch.getStudyMode())) throw conflict("TRAINING_ENDPOINT_REQUIRED", "学习方式已变化，请重新进入");
         var entries=context.entries(batchId); var item=find(entries,itemId); var word=words.selectOneById(item.getWordId());
         var latest=events.latestAnswer(userId);
         boolean skipped="SKIPPED".equals(item.getLearningStatus());
@@ -217,7 +217,7 @@ public class DailyLearningService {
         var now=actionTime==null?context.now():actionTime;
         var batch=daily(userId,batchId,true,now.toLocalDate()); var entries=context.entries(batchId); var item=find(entries,itemId);
         if(!unified && (!"RECOGNITION".equals(batch.getStudyMode()) || item.getStudyPresentationId()!=null))
-            throw conflict("TRAINING_ENDPOINT_REQUIRED", "请按当前展示使用统一训练接口");
+            throw conflict("TRAINING_ENDPOINT_REQUIRED", "学习方式已变化，请重新进入");
         var state=availableState(userId,item);
         var previous=events.request(userId,request.requestId(),batchId,itemId,"ANSWER",request.result(),null);
         if(previous!=null) {

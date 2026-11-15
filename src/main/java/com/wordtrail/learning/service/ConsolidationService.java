@@ -50,7 +50,7 @@ public class ConsolidationService {
         catch(java.security.NoSuchAlgorithmException ex) { throw new IllegalStateException(ex); }
         var old=batches.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId)).and(column("creation_request_id").eq(request.getRequestId())));
         if(old!=null) {
-            if(!hash.equals(old.getCreationFingerprint()) || !"CONSOLIDATION".equals(old.getPracticeMode())) throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
+            if(!hash.equals(old.getCreationFingerprint()) || !"CONSOLIDATION".equals(old.getPracticeMode())) throw conflict("REQUEST_ID_REUSED","提交结果存在冲突，请核对记录");
             return daily.view(old,context.entries(old.getId()));
         }
         var selected=issues.candidates(userId,request.scope(),request.getReason()==null?null:request.getReason().name(),ids,
@@ -85,7 +85,7 @@ public class ConsolidationService {
         var previous=batches.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId)).and(column("creation_request_id").eq(requestId)));
         if(previous!=null) {
             if(!"CONSOLIDATION".equals(previous.getPracticeMode()) || !"AUTO_CONSOLIDATION".equals(previous.getCreationFingerprint()))
-                throw conflict("REQUEST_ID_REUSED","请求标识已用于其他内容");
+                throw conflict("REQUEST_ID_REUSED","提交结果存在冲突，请核对记录");
             if(!"IN_PROGRESS".equals(previous.getStatus())) return daily.view(previous,context.entries(previous.getId()));
         }
         var active=previous!=null ? previous : batches.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(userId))

@@ -85,7 +85,7 @@ public class SentenceBankService {
         String contentHash=hash(request.text());
         var prior=imports.selectOneByQuery(QueryWrapper.create().where(column("user_id").eq(user.id())).and(column("request_id").eq(request.requestId())));
         if(prior!=null) {
-            if(!contentHash.equals(prior.getContentHash())) throw conflict("REQUEST_ID_REUSED","该请求标识已用于其他导入内容");
+            if(!contentHash.equals(prior.getContentHash())) throw conflict("REQUEST_ID_REUSED","导入结果存在冲突，请核对记录");
             return imported(prior);
         }
         var prepared=prepare(request.text());
