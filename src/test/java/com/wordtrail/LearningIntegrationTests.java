@@ -1533,6 +1533,53 @@ class LearningIntegrationTests {
         assertEquals(401,call("GET",path,null,null).statusCode());
     }
 
+    @Test void firstFeedbackCorrectionsRecalculateFromOriginalLevel() throws Exception {
+        long word=wordIds.get(1); joinPlan(word);
+        var memory=state(a,word); memory.setFirstLearnedAt(statisticsDate().minusDays(90).atStartOfDay());
+        memory.setReviewLevel(6); memory.setNextReviewAt(statisticsDate().atStartOfDay()); states.update(memory);
+        long batch=startDay().get("batchId").asLong(),item=itemId(batch);
+        long original=dailyAnswer(batch,item,1,1).get("logId").asLong();
+        assertEquals(statisticsDate().plusDays(90).atStartOfDay(),state(a,word).getNextReviewAt());
+        correction(batch,item,original,2,requestId());
+        assertEquals(4,state(a,word).getReviewLevel());
+        assertEquals(statisticsDate().plusDays(30).atStartOfDay(),state(a,word).getNextReviewAt());
+        correction(batch,item,original,3,requestId());
+        assertEquals(statisticsDate().plusDays(1).atStartOfDay(),state(a,word).getNextReviewAt());
+        correction(batch,item,original,2,requestId());
+        assertEquals(statisticsDate().plusDays(30).atStartOfDay(),state(a,word).getNextReviewAt());
+    }
+
+    @Test void fuzzyReviewAndFinalCorrectionRestoreTheCorrectSchedule() throws Exception {
+        long word=wordIds.get(1); joinPlan(word);
+        var memory=state(a,word); memory.setFirstLearnedAt(statisticsDate().minusDays(90).atStartOfDay());
+        memory.setReviewLevel(5); memory.setNextReviewAt(statisticsDate().minusDays(30).atStartOfDay()); states.update(memory);
+        long batch=startDay().get("batchId").asLong(),item=itemId(batch);
+        int[] answers={2,2,2,2,1,2};
+        for(int i=0;i<answers.length;i++) {
+            dailyAnswer(batch,item,answers[i],i+1);
+            if(i==0) {
+                assertEquals(4,state(a,word).getReviewLevel());
+                assertEquals(statisticsDate().plusDays(30).atStartOfDay(),state(a,word).getNextReviewAt());
+            }
+        }
+        assertEquals("LIMIT_REACHED",details.selectOneById(item).getCompletionReason());
+        assertEquals(0,state(a,word).getReviewLevel());
+        assertEquals(statisticsDate().plusDays(1).atStartOfDay(),state(a,word).getNextReviewAt());
+        var original=reviewLogs.selectListByQuery(QueryWrapper.create().where(column("batch_id").eq(batch))
+            .and(column("event_type").eq("ANSWER")).orderBy(column("id").desc())).getFirst();
+        assertTrue(original.getAffectsSchedule());
+        String key=requestId(); var corrected=correction(batch,item,original.getId(),1,key);
+        assertEquals(corrected,correction(batch,item,original.getId(),1,key));
+        assertEquals("RECALLED",details.selectOneById(item).getCompletionReason());
+        assertEquals(4,state(a,word).getReviewLevel());
+        assertEquals(statisticsDate().plusDays(30).atStartOfDay(),state(a,word).getNextReviewAt());
+        correction(batch,item,original.getId(),2,requestId());
+        assertEquals("LIMIT_REACHED",details.selectOneById(item).getCompletionReason());
+        assertEquals(statisticsDate().plusDays(1).atStartOfDay(),state(a,word).getNextReviewAt());
+        correction(batch,item,original.getId(),1,requestId());
+        assertEquals(statisticsDate().plusDays(30).atStartOfDay(),state(a,word).getNextReviewAt());
+    }
+
     @Test void intradayFirstKnownCompletesButInitiallyWeakWordsNeedSeveralRecallChecks() throws Exception {
         joinPlan(wordIds.get(1)); long batch=startDay().get("batchId").asLong(),item=itemId(batch);
         dailyAnswer(batch,item,1,1); var known=details.selectOneById(item);
@@ -2694,6 +2741,18 @@ class LearningIntegrationTests {
         assertEquals(1,trainingModeStatistics("DICTATION").get("answerCount").asInt());
         assertEquals(2,get(dailyPath(batch)+"/training/attempts",tokenA).get("total").asInt());
         assertEquals(1,get("/api/learning/statistics/training",tokenA).get("completedWordCount").asInt());
+    }
+
+    @Test void assistedDictationOfMatureWordStillSchedulesTomorrow() throws Exception {
+        long word=wordIds.get(1); joinPlan(word);
+        var memory=state(a,word); memory.setFirstLearnedAt(statisticsDate().minusDays(60).atStartOfDay());
+        memory.setReviewLevel(5); memory.setNextReviewAt(statisticsDate().atStartOfDay()); states.update(memory);
+        long batch=startDay().get("batchId").asLong(); studyMode(batch,"DICTATION");
+        train(batch,trainingQuestion(batch,null),null,null);
+        var answer=train(batch,trainingQuestion(batch,null),spelling(1),null);
+        assertEquals("ASSISTED",answer.get("completionReason").asText());
+        assertEquals(0,state(a,word).getReviewLevel());
+        assertEquals(statisticsDate().plusDays(1).atStartOfDay(),state(a,word).getNextReviewAt());
     }
 
     @Test void unifiedDictationAcceptsNewWordsAndRevealIsPersistedWithoutCompletingTheWord() throws Exception {

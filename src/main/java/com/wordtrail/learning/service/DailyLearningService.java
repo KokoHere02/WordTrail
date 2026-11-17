@@ -231,18 +231,22 @@ public class DailyLearningService {
         var before=snapshot(state,request.attemptNo(),remaining);
         boolean schedule=item.getAnswerCount()==0;
         if(schedule) {
-            int schedulingResult=mode==StudyMode.FOLLOW_TYPING || (mode.recallInput() && hinted) ? 2 : request.result();
+            int schedulingResult=mode==StudyMode.FOLLOW_TYPING || (mode.recallInput() && hinted) ? 3 : request.result();
             applySchedule(state,before,schedulingResult,batch.getLearningDate());
         } else if(mode!=StudyMode.RECOGNITION && (mode==StudyMode.FOLLOW_TYPING || hinted || request.result()!=1)
                 && state.getNextReviewAt()!=null && state.getNextReviewAt().isAfter(batch.getLearningDate().plusDays(1).atStartOfDay())) {
-            applySchedule(state,before,2,batch.getLearningDate()); schedule=true;
+            applySchedule(state,before,3,batch.getLearningDate()); schedule=true;
         }
         if(state.getFirstLearnedAt()==null) { state.setFirstLearnedAt(now); }
         state.setLastLearnedAt(now); state.setLastResult(request.result()); state.setLastBatchItemId(itemId);
-        if(states.update(state)!=1) { throw new IllegalStateException("Could not update word memory"); }
         item.setAnswerCount(item.getAnswerCount()+1); item.setRelearnCount(Math.max(0,item.getAnswerCount()-1));
         item.setStudyHintUsed(true);
         applyFeedback(item,entries,request.result(),now,remaining,mode,hinted);
+        if("LIMIT_REACHED".equals(item.getCompletionReason()) && (state.getReviewLevel()!=0
+                || !Objects.equals(state.getNextReviewAt(),batch.getLearningDate().plusDays(1).atStartOfDay()))) {
+            applySchedule(state,before,3,batch.getLearningDate()); schedule=true;
+        }
+        if(states.update(state)!=1) { throw new IllegalStateException("Could not update word memory"); }
         var event=events.append(userId,item,request.requestId(),"ANSWER",null,request.result(),schedule,
             encode(before),encode(snapshot(state,request.attemptNo(),item.getReinforcementRemaining())),now);
         if(mode!=StudyMode.RECOGNITION) events.markMode(event,mode.name());
@@ -265,19 +269,30 @@ public class DailyLearningService {
             throw conflict("CORRECTION_NOT_ALLOWED","只能更正今日最近一次作答");
         }
         var before=snapshot(state,item.getAnswerCount(),remaining(userId,item));
+        boolean affectsSchedule=false;
         if(!Objects.equals(item.getResult(),request.result())) {
             var originalBefore=decode(original.getScheduleBefore());
-            if(Boolean.TRUE.equals(original.getAffectsSchedule())) {
-                applySchedule(state,decode(original.getScheduleBefore()),request.result(),batch.getLearningDate());
+            if(originalBefore.itemAttemptNo()==1 && Boolean.TRUE.equals(original.getAffectsSchedule())) {
+                applySchedule(state,originalBefore,request.result(),batch.getLearningDate());
+                affectsSchedule=true;
+            } else if(originalBefore.itemAttemptNo()==DailyReinforcementPolicy.MAX_ANSWERS) {
+                // Re-evaluate the final attempt from its original snapshot, even across repeated corrections.
+                state.setReviewLevel(originalBefore.reviewLevel());
+                state.setNextReviewAt(originalBefore.nextReviewAt());
             }
             state.setLastResult(request.result()); state.setLastLearnedAt(now); state.setLastBatchItemId(itemId);
-            if(states.update(state)!=1) { throw new IllegalStateException("Could not correct word memory"); }
             int originalRemaining=originalBefore.reinforcementRemaining()!=null ? originalBefore.reinforcementRemaining()
                 : replayRemaining(userId,item,true);
             applyFeedback(item,entries,request.result(),now,originalRemaining);
+            if("LIMIT_REACHED".equals(item.getCompletionReason())) {
+                applySchedule(state,originalBefore,3,batch.getLearningDate());
+            }
+            affectsSchedule=affectsSchedule || before.reviewLevel()!=state.getReviewLevel()
+                || !Objects.equals(before.nextReviewAt(),state.getNextReviewAt());
+            if(states.update(state)!=1) { throw new IllegalStateException("Could not correct word memory"); }
         }
         var event=events.append(userId,item,request.requestId(),"CORRECTION",original.getId(),request.result(),
-            original.getAffectsSchedule(),encode(before),encode(snapshot(state,item.getAnswerCount(),remaining(userId,item))),now);
+            affectsSchedule,encode(before),encode(snapshot(state,item.getAnswerCount(),remaining(userId,item))),now);
         updateBatch(batch,entries,now);
         return answerView(event,batch,entries);
     }
