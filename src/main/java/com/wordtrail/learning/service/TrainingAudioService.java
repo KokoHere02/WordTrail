@@ -1,11 +1,14 @@
 package com.wordtrail.learning.service;
 
 import com.wordtrail.learning.dto.PronunciationRequest.Accent;
+import com.wordtrail.common.exception.BusinessException;
 import com.wordtrail.security.CurrentUser;
+import com.wordtrail.sentence.mapper.SentenceQuestionMapper;
 import com.wordtrail.word.mapper.WordMapper;
 import com.wordtrail.learning.mapper.LearningBatchItemMapper;
 import java.util.Objects;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import static com.wordtrail.learning.service.LearningContext.conflict;
@@ -16,6 +19,7 @@ public class TrainingAudioService {
     private final LearningContext context;
     private final CurrentUser currentUser;
     private final WordMapper words;
+    private final SentenceQuestionMapper sentences;
     private final LearningBatchItemMapper items;
     private final LearningSettingsService settings;
     private final DailyLearningService daily;
@@ -36,6 +40,15 @@ public class TrainingAudioService {
     @Transactional(readOnly=true) public String wordTarget(long wordId) {
         var word=words.selectOneById(wordId); if(word==null) throw conflict("WORD_NOT_FOUND","单词不存在"); return word.getWord();
     }
+    @Transactional(readOnly=true)
+    public String sentenceTarget(long sentenceId) {
+        var sentence = sentences.selectOneById(sentenceId);
+        if (sentence == null || !"ACTIVE".equals(sentence.getStatus())) {
+            throw new BusinessException(HttpStatus.NOT_FOUND, "SENTENCE_NOT_FOUND", "句子不存在或已停用");
+        }
+        return sentence.getEnglishText();
+    }
+
     public byte[] audio(String word,Accent accent) {
         if(word==null || word.isBlank()) throw conflict("TRAINING_WORD_UNAVAILABLE","单词拼写为空");
         Accent selected=accent==null?Accent.valueOf(settings.pronunciation(currentUser.id()).accent()):accent;

@@ -63,6 +63,7 @@ class SentenceTranslationIntegrationTests {
     @Autowired CurrentUser currentUser;
     @MockitoBean SentenceEditorAccess editorAccess;
     @Autowired LearningIntegrationTests.DatabaseProbe probe;
+    @Autowired LearningIntegrationTests.FixtureAudio audioFixture;
     @Autowired LearningIntegrationTests.StudyClock clock;
     private final HttpClient client=HttpClient.newHttpClient();
     private final List<Long> userIds=new ArrayList<>(),questionIds=new ArrayList<>();
@@ -139,6 +140,18 @@ class SentenceTranslationIntegrationTests {
     private void error(String method,String path,Object body,String token,int status,String code) throws Exception {
         var response=call(method,BASE+path,body,token); assertEquals(status,response.statusCode(),response.body());
         assertEquals(code,json.readTree(response.body()).get("code").asString());
+    }
+
+    @Test void audioReadsActiveEnglishSentenceWithRequestedAccent() throws Exception {
+        String base = "/api/sentence-practice/sentences/";
+        String path = base + questionIds.get(0) + "/audio?accent=UK";
+        assertEquals(401, call("GET", path, null, null).statusCode());
+        var response = call("GET", path, null, tokenA);
+        assertEquals(200, response.statusCode(), response.body());
+        assertEquals("audio/wav", response.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals("Example " + prefix + "0.", audioFixture.lastWord);
+        assertEquals(com.wordtrail.learning.dto.PronunciationRequest.Accent.UK, audioFixture.lastAccent);
+        assertEquals(404, call("GET", base + questionIds.get(3) + "/audio", null, tokenA).statusCode());
     }
 
     private LearningBatch recordBatch(long user, String type, String mode, String status, LocalDate date, LocalDateTime created) {

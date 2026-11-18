@@ -19,6 +19,10 @@ public class PronunciationController {
     @GetMapping("/api/words/{wordId}/audio") public ResponseEntity<byte[]> word(@PathVariable @Positive long wordId,@RequestParam(required=false) Accent accent) {
         return response(audio.audio(audio.wordTarget(wordId),accent));
     }
+    @GetMapping("/api/sentence-practice/sentences/{sentenceId}/audio")
+    public ResponseEntity<byte[]> sentence(@PathVariable @Positive long sentenceId, @RequestParam(required=false) Accent accent) {
+        return response(audio.audio(audio.sentenceTarget(sentenceId), accent));
+    }
     @GetMapping("/api/learning-batches/{batchId}/training/items/{itemId}/audio")
     public ResponseEntity<byte[]> training(@PathVariable @Positive long batchId,@PathVariable @Positive long itemId,
             @RequestParam @Pattern(regexp="[a-f0-9-]{36}") String presentationId,@RequestParam @PositiveOrZero long modeVersion,
