@@ -40,8 +40,11 @@ public class WordService {
             state.getReviewLevel(), state.getFirstLearnedAt()!=null,
             "ACTIVE".equals(state.getPlanStatus()) && state.getFirstLearnedAt()!=null
                 && state.getNextReviewAt()!=null && !state.getNextReviewAt().isAfter(context.now()));
+        var locations = words.bookLocations(userId, wordId);
+        var personalBooks = locations.stream().filter(WordDetailVO.BookLocation::personal)
+            .map(book -> new WordDetailVO.PersonalBook(book.id(), book.name())).toList();
         return new WordDetailVO(word.getId(), word.getWord(), word.getPhonetic(), word.getTranslation(),
-            words.personalBooks(userId, wordId), plan);
+            personalBooks, plan, locations);
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)

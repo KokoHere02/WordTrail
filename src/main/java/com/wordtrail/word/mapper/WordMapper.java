@@ -26,10 +26,16 @@ public interface WordMapper extends BaseMapper<Word> {
     List<ImportMatch> importMatches(@Param("bookId") long bookId,@Param("terms") List<String> terms);
 
     @Select("""
-        SELECT b.id,b.name FROM word_book b JOIN word_book_item i ON i.book_id=b.id
-        WHERE b.owner_id=#{userId} AND i.word_id=#{wordId} ORDER BY b.id ASC
+        SELECT b.id, b.name, (b.owner_id IS NOT NULL) AS personal,
+               (SELECT COUNT(*) FROM word_book_item preceding_item
+                WHERE preceding_item.book_id = i.book_id AND
+                  (preceding_item.sort_order < i.sort_order OR
+                   (preceding_item.sort_order = i.sort_order AND preceding_item.id < i.id))) AS word_index
+        FROM word_book_item i JOIN word_book b ON b.id = i.book_id
+        WHERE i.word_id = #{wordId} AND (b.owner_id IS NULL OR b.owner_id = #{userId})
+        ORDER BY personal DESC, b.id ASC
         """)
-    List<WordDetailVO.PersonalBook> personalBooks(@Param("userId") long userId, @Param("wordId") long wordId);
+    List<WordDetailVO.BookLocation> bookLocations(@Param("userId") long userId, @Param("wordId") long wordId);
 
     String SEARCH_FROM = """
         FROM word w WHERE

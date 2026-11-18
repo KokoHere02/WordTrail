@@ -2106,6 +2106,12 @@ class LearningIntegrationTests {
         long word=wordIds.get(1); associate(ownBook,word,1); associate(otherBook,word,1);
         var before=get("/api/words/"+word,tokenA);
         assertTrue(before.get("plan").isNull()); assertEquals(List.of(ownBook),ids(before.get("personalBooks")));
+        var locations = before.get("bookLocations");
+        assertEquals(List.of(ownBook, systemBook), ids(locations));
+        assertEquals(1, locations.get(0).get("wordIndex").asInt());
+        assertEquals(0, locations.get(1).get("wordIndex").asInt());
+        var tiedOrder = get("/api/words/"+wordIds.get(2),tokenA).get("bookLocations");
+        assertEquals(1, tiedOrder.get(1).get("wordIndex").asInt());
         assertEquals("测试",before.get("translation").asText());
         joinPlan(word); var planned=get("/api/words/"+word,tokenA).get("plan");
         assertEquals("ACTIVE",planned.get("planStatus").asText()); assertFalse(planned.get("started").asBoolean());
