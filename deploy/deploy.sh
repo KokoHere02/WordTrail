@@ -71,11 +71,24 @@ web_port=$(config_value WEB_PORT); app_port=$(config_value APP_PORT)
 web_server_name=$(config_value WEB_SERVER_NAME)
 web_server_name=${web_server_name:-_}
 valid_server_name "$web_server_name" || die "请检查 $CONFIG 中的 WEB_SERVER_NAME，应填写单个域名或 _。"
+tls_cert_dir=$(config_value TLS_CERT_DIR)
+if [[ -n $tls_cert_dir ]]; then
+  acme_webroot=$(config_value ACME_WEBROOT)
+  ssl_certificate=$(config_value SSL_CERTIFICATE)
+  ssl_certificate_key=$(config_value SSL_CERTIFICATE_KEY)
+  ssl_certificate=${ssl_certificate:-fullchain.pem}
+  ssl_certificate_key=${ssl_certificate_key:-privkey.pem}
+  [[ $tls_cert_dir == /* && $acme_webroot == /* ]] || die 'TLS_CERT_DIR 和 ACME_WEBROOT 必须是未加引号的绝对路径。'
+  valid_name "$ssl_certificate" && valid_name "$ssl_certificate_key" || die '证书和私钥文件名只能包含字母、数字、点、下划线和连字符。'
+  [[ -f $tls_cert_dir/$ssl_certificate && -f $tls_cert_dir/$ssl_certificate_key ]] || die 'TLS_CERT_DIR 中缺少证书或私钥文件。'
+  [[ -d $acme_webroot/.well-known/acme-challenge ]] || die 'ACME_WEBROOT 中缺少 .well-known/acme-challenge 目录。'
+fi
 for value in "$mysql_host" "$mysql_network" "$mysql_database" "$mysql_user"; do
   valid_name "$value" || die "请检查 $CONFIG 中的 MySQL 容器、网络、数据库和用户名。"
 done
 valid_port "$web_port" && valid_port "$app_port" || die "请检查 $CONFIG 中的端口。"
 (( 10#$web_port != 10#$app_port )) || die '公网端口与后端本机端口不能相同。'
+(( 10#$web_port != 443 && 10#$app_port != 443 )) || die 'HTTP 或后端端口不能与 HTTPS 端口 443 相同。'
 [[ -f $BACKEND_DIR/src/main/resources/db/init.sql ]] || die '缺少后端 init.sql。'
 docker inspect --type container "$mysql_host" >/dev/null 2>&1 || die "找不到 MySQL 容器 $mysql_host。"
 [[ $(docker inspect -f '{{.State.Running}}' "$mysql_host") == true ]] || die "MySQL 容器 $mysql_host 未运行。"
@@ -89,11 +102,11 @@ WEB_DIR=$(cd -- "$WEB_DIR" && pwd -P)
 export WORDTRAIL_WEB_DIR="$WEB_DIR" WORDTRAIL_DEPLOY_DIR="$DEPLOY_DIR"
 # Use the saved deployment configuration consistently even if the caller has
 # unrelated variables with the same names in their shell environment.
-unset MYSQL_HOST MYSQL_NETWORK MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD JWT_SECRET_BASE64 APP_PORT WEB_PORT WEB_SERVER_NAME CORS_ALLOWED_ORIGINS SENTENCE_EDITOR_USER_IDS
-COMPOSE+=(--project-directory "$BACKEND_DIR" --env-file "$CONFIG" -f "$BACKEND_DIR/docker-compose.yml" -f "$DEPLOY_DIR/docker-compose.web.yml")
-if [[ -f "$BACKEND_DIR/.local/deploy/compose.override.yml" ]]; then
-  COMPOSE+=(-f "$BACKEND_DIR/.local/deploy/compose.override.yml")
+unset MYSQL_HOST MYSQL_NETWORK MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD JWT_SECRET_BASE64 APP_PORT WEB_PORT WEB_SERVER_NAME TLS_CERT_DIR ACME_WEBROOT SSL_CERTIFICATE SSL_CERTIFICATE_KEY WEB_TLS_DIRECTIVES CORS_ALLOWED_ORIGINS SENTENCE_EDITOR_USER_IDS
+if [[ -n $tls_cert_dir ]]; then
+  export WEB_TLS_DIRECTIVES="listen 443 ssl; ssl_certificate /etc/nginx/tls/$ssl_certificate; ssl_certificate_key /etc/nginx/tls/$ssl_certificate_key;"
 fi
+COMPOSE+=(--project-directory "$BACKEND_DIR" --env-file "$CONFIG" -f "$BACKEND_DIR/docker-compose.yml" -f "$DEPLOY_DIR/docker-compose.web.yml")
 "${COMPOSE[@]}" config --quiet
 
 if ! docker network inspect "$mysql_network" >/dev/null 2>&1; then
@@ -161,8 +174,12 @@ for ((i=0; i<36; i++)); do
   if curl -fsS --max-time 3 "http://127.0.0.1:$app_port/health/ready" >/dev/null && curl -fsS --max-time 3 "http://127.0.0.1:$web_port/" >/dev/null; then
     public_host=$web_server_name
     [[ $public_host != _ ]] || public_host='服务器公网IP'
-    [[ $web_port == 80 ]] || public_host+=":$web_port"
-    printf '\n部署完成：浏览器访问 http://%s\n' "$public_host"
+    if [[ -n $tls_cert_dir ]]; then
+      printf '\n部署完成：浏览器访问 https://%s\n' "$public_host"
+    else
+      [[ $web_port == 80 ]] || public_host+=":$web_port"
+      printf '\n部署完成：浏览器访问 http://%s\n' "$public_host"
+    fi
     printf '查看服务：'; printf '%q ' "${COMPOSE[@]}"; printf 'ps\n'
     exit 0
   fi
