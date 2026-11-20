@@ -27,6 +27,10 @@ ask_default() {
   printf -v "$3" '%s' "${answer:-$2}"
 }
 valid_name() { [[ $1 =~ ^[a-zA-Z0-9_.-]+$ ]]; }
+valid_server_name() {
+  local label='[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?'
+  [[ $1 == _ || ( ${#1} -le 253 && $1 =~ ^${label}(\.${label})*$ ) ]]
+}
 valid_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 
 if [[ ! -f $CONFIG ]]; then
@@ -36,7 +40,9 @@ if [[ ! -f $CONFIG ]]; then
   ask_default '共享 Docker 网络' 'wordtrail-db' mysql_network
   ask_default '数据库名' 'word_trail_db' mysql_database
   ask_default '数据库用户名' 'wordtrail' mysql_user
-  ask_default '公网访问端口' '8080' web_port
+  ask_default '网站域名（仅通过 IP 访问可直接回车）' '_' web_server_name
+  valid_server_name "$web_server_name" || die '请输入单个域名，例如 word.example.com。'
+  ask_default '公网访问端口' '80' web_port
   ask_default '后端本机端口' '8081' app_port
   for value in "$mysql_host" "$mysql_network" "$mysql_database" "$mysql_user"; do
     valid_name "$value" || die '容器、网络、数据库及用户名只能包含字母、数字、点、下划线和连字符。'
@@ -51,7 +57,7 @@ if [[ ! -f $CONFIG ]]; then
   {
     printf 'MYSQL_HOST=%s\nMYSQL_NETWORK=%s\nMYSQL_DATABASE=%s\nMYSQL_USER=%s\n' "$mysql_host" "$mysql_network" "$mysql_database" "$mysql_user"
     printf "MYSQL_PASSWORD='%s'\nJWT_SECRET_BASE64='%s'\n" "$escaped" "$jwt_secret"
-    printf 'WEB_PORT=%s\nAPP_PORT=%s\n' "$web_port" "$app_port"
+    printf 'WEB_SERVER_NAME=%s\nWEB_PORT=%s\nAPP_PORT=%s\n' "$web_server_name" "$web_port" "$app_port"
     printf 'CORS_ALLOWED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173\nSENTENCE_EDITOR_USER_IDS=\n'
   } > "$CONFIG"
   unset escaped jwt_secret
@@ -62,6 +68,9 @@ config_value() { awk -v key="$1" 'index($0,key "=")==1 { print substr($0,length(
 mysql_host=$(config_value MYSQL_HOST); mysql_network=$(config_value MYSQL_NETWORK)
 mysql_database=$(config_value MYSQL_DATABASE); mysql_user=$(config_value MYSQL_USER)
 web_port=$(config_value WEB_PORT); app_port=$(config_value APP_PORT)
+web_server_name=$(config_value WEB_SERVER_NAME)
+web_server_name=${web_server_name:-_}
+valid_server_name "$web_server_name" || die "请检查 $CONFIG 中的 WEB_SERVER_NAME，应填写单个域名或 _。"
 for value in "$mysql_host" "$mysql_network" "$mysql_database" "$mysql_user"; do
   valid_name "$value" || die "请检查 $CONFIG 中的 MySQL 容器、网络、数据库和用户名。"
 done
@@ -80,7 +89,7 @@ WEB_DIR=$(cd -- "$WEB_DIR" && pwd -P)
 export WORDTRAIL_WEB_DIR="$WEB_DIR" WORDTRAIL_DEPLOY_DIR="$DEPLOY_DIR"
 # Use the saved deployment configuration consistently even if the caller has
 # unrelated variables with the same names in their shell environment.
-unset MYSQL_HOST MYSQL_NETWORK MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD JWT_SECRET_BASE64 APP_PORT WEB_PORT CORS_ALLOWED_ORIGINS SENTENCE_EDITOR_USER_IDS
+unset MYSQL_HOST MYSQL_NETWORK MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD JWT_SECRET_BASE64 APP_PORT WEB_PORT WEB_SERVER_NAME CORS_ALLOWED_ORIGINS SENTENCE_EDITOR_USER_IDS
 COMPOSE+=(--project-directory "$BACKEND_DIR" --env-file "$CONFIG" -f "$BACKEND_DIR/docker-compose.yml" -f "$DEPLOY_DIR/docker-compose.web.yml")
 "${COMPOSE[@]}" config --quiet
 
@@ -147,7 +156,10 @@ printf '\n构建并启动前后端，首次构建需要下载镜像和依赖。\
 "${COMPOSE[@]}" up -d --build
 for ((i=0; i<36; i++)); do
   if curl -fsS --max-time 3 "http://127.0.0.1:$app_port/health/ready" >/dev/null && curl -fsS --max-time 3 "http://127.0.0.1:$web_port/" >/dev/null; then
-    printf '\n部署完成：浏览器访问 http://服务器公网IP:%s\n' "$web_port"
+    public_host=$web_server_name
+    [[ $public_host != _ ]] || public_host='服务器公网IP'
+    [[ $web_port == 80 ]] || public_host+=":$web_port"
+    printf '\n部署完成：浏览器访问 http://%s\n' "$public_host"
     printf '查看服务：'; printf '%q ' "${COMPOSE[@]}"; printf 'ps\n'
     exit 0
   fi
