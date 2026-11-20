@@ -91,6 +91,9 @@ export WORDTRAIL_WEB_DIR="$WEB_DIR" WORDTRAIL_DEPLOY_DIR="$DEPLOY_DIR"
 # unrelated variables with the same names in their shell environment.
 unset MYSQL_HOST MYSQL_NETWORK MYSQL_DATABASE MYSQL_USER MYSQL_PASSWORD JWT_SECRET_BASE64 APP_PORT WEB_PORT WEB_SERVER_NAME CORS_ALLOWED_ORIGINS SENTENCE_EDITOR_USER_IDS
 COMPOSE+=(--project-directory "$BACKEND_DIR" --env-file "$CONFIG" -f "$BACKEND_DIR/docker-compose.yml" -f "$DEPLOY_DIR/docker-compose.web.yml")
+if [[ -f "$BACKEND_DIR/.local/deploy/compose.override.yml" ]]; then
+  COMPOSE+=(-f "$BACKEND_DIR/.local/deploy/compose.override.yml")
+fi
 "${COMPOSE[@]}" config --quiet
 
 if ! docker network inspect "$mysql_network" >/dev/null 2>&1; then
