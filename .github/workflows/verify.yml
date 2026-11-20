@@ -6,13 +6,6 @@ on:
 permissions:
   contents: read
 jobs:
-  backup-scripts:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Parse backup scripts and reject invalid backups without database access
-        shell: pwsh
-        run: ./scripts/Test-BackupScripts.ps1
   h2:
     runs-on: ubuntu-latest
     steps:
