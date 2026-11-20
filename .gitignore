@@ -47,3 +47,7 @@ build/
 *.log
 /.local/
 /backups/
+/AGENTS.md
+/docs/PHONE_AUTH.md
+/deploy/test-update.sh
+/scripts/*.ps1
