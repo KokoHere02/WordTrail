@@ -1,5 +1,6 @@
 server {
     listen 80;
+    ${WEB_TLS_DIRECTIVES}
     server_name ${WEB_SERVER_NAME};
     root /usr/share/nginx/html;
     index index.html;
@@ -8,6 +9,10 @@ server {
     # Re-resolve the Compose service after a backend container is recreated.
     resolver 127.0.0.11 valid=10s ipv6=off;
     set $backend http://app:8080;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
 
     location /api/ {
         proxy_pass $backend$request_uri;
